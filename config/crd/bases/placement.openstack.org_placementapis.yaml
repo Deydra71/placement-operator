@@ -365,6 +365,29 @@ spec:
                 description: ServiceUser - optional username used for this service
                   to register in keystone
                 type: string
+              tls:
+                description: TLS certificate and CA for internal TLS traffic
+                properties:
+                  ca:
+                    description: Ca contains CA-specific settings, which could be
+                      used both by services (to define their own CA certificates)
+                      and by clients (to verify the server's certificate)
+                    properties:
+                      caSecretName:
+                        type: string
+                    type: object
+                  service:
+                    description: Service contains server-specific TLS secret
+                    properties:
+                      disableNonTLSListeners:
+                        type: boolean
+                      secretName:
+                        type: string
+                    type: object
+                required:
+                - ca
+                - service
+                type: object
             required:
             - containerImage
             - databaseInstance
