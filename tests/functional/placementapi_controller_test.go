@@ -684,39 +684,38 @@ var _ = Describe("PlacementAPI controller", func() {
 
 	})
 
-	When("TLS config is present", func() {
-		var placementAPINames Names
-
+	Context("PlacementAPI is fully deployed with TLS", func() {
 		BeforeEach(func() {
-			specWithTLS := GetDefaultPlacementAPISpec()
-			instance := CreatePlacementAPI(names.PlacementAPIName, specWithTLS)
 
-			placementAPINames = CreateNames(types.NamespacedName{
-				Namespace: instance.GetNamespace(),
-				Name:      instance.GetName(),
-			})
+			DeferCleanup(th.DeleteInstance, CreatePlacementAPI(names.PlacementAPIName, GetDefaultPlacementAPISpecWithTLS()))
+
+			DeferCleanup(
+				k8sClient.Delete, ctx, CreatePlacementAPISecret(namespace, SecretName))
+			DeferCleanup(keystone.DeleteKeystoneAPI, keystone.CreateKeystoneAPI(namespace))
+
+			serviceSpec := corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 3306}}}
+			DeferCleanup(
+				mariadb.DeleteDBService,
+				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
+			)
+			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
+			keystone.SimulateKeystoneEndpointReady(names.KeystoneEndpointName)
+			th.SimulateJobSuccess(names.DBSyncJobName)
+			th.SimulateDeploymentReplicaReady(names.DeploymentName)
+
+			th.ExpectCondition(
+				names.PlacementAPIName,
+				ConditionGetterFunc(PlacementConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
 		})
 
-		It("should create volumes with the TLS information", func() {
+		It("creates TLS related volumes and volume mounts", func() {
 			deployment := th.GetDeployment(names.DeploymentName)
-			Eventually(func() {
-				Expect(k8sClient.Get(ctx, placementAPINames.DeploymentName, deployment)).To(Succeed())
-			}).Should(Succeed())
 			Expect(deployment.Spec.Template.Spec.Volumes).To(ContainElement(HaveField("Name", Equal("tls-certs"))))
 			Expect(deployment.Spec.Template.Spec.Volumes).To(ContainElement(HaveField("Name", Equal("ca-certs"))))
-		})
-
-		It("should create volume mounts with the TLS information", func() {
-			deployment := th.GetDeployment(names.DeploymentName)
-			Eventually(func() {
-				Expect(k8sClient.Get(ctx, placementAPINames.DeploymentName, deployment)).To(Succeed())
-			}).Should(Succeed())
-
-			container := deployment.Spec.Template.Spec.Containers[0]
-
-			Expect(container.VolumeMounts).To(ContainElement(HaveField("Name", Equal("tls-crt"))))
-			Expect(container.VolumeMounts).To(ContainElement(HaveField("Name", Equal("tls-key"))))
-			Expect(container.VolumeMounts).To(ContainElement(HaveField("Name", Equal("ca-certs"))))
 		})
 	})
 

@@ -15,6 +15,11 @@ spec:
   preserveJobs: false
   replicas: 1
   secret: placement-secret
+  # tls:
+  #   ca:
+  #     caSecretName: "ca-certs"
+  #   service:
+  #     secretName: "tls-certs"
   #resources:
   #  requests:
   #    memory: "500Mi"

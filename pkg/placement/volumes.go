@@ -57,6 +57,9 @@ func getVolumes(instance *placementv1.PlacementAPI) []corev1.Volume {
 	}
 
 	if instance.Spec.TLS != nil {
+		// fmt.Printf("Service: %+v\n", *instance.Spec.TLS.Service)       // // For debug
+		// fmt.Printf("Ca: %+v\n", *instance.Spec.TLS.Ca)                 // For debug
+		// fmt.Println("instance.Spec.TLS is set. Adding TLS volumes...") // For debug
 		caVolumes := instance.Spec.TLS.CreateVolumes()
 		volumes = append(volumes, caVolumes...)
 	}

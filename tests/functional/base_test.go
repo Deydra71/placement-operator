@@ -92,6 +92,21 @@ func GetDefaultPlacementAPISpec() map[string]interface{} {
 	}
 }
 
+func GetDefaultPlacementAPISpecWithTLS() map[string]interface{} {
+	return map[string]interface{}{
+		"databaseInstance": "openstack",
+		"secret":           SecretName,
+		"tls": map[string]interface{}{
+			"ca": map[string]interface{}{
+				"caSecretName": "ca-certs",
+			},
+			"service": map[string]interface{}{
+				"secretName": "tls-certs",
+			},
+		},
+	}
+}
+
 func CreatePlacementAPI(name types.NamespacedName, spec map[string]interface{}) client.Object {
 
 	raw := map[string]interface{}{
