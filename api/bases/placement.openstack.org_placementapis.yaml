@@ -366,25 +366,87 @@ spec:
                   to register in keystone
                 type: string
               tls:
-                description: TLS certificate and CA for internal TLS traffic
+                description: Service certificates and CA certificates bundle file
+                  for internal TLS traffic
                 properties:
+                  APIService:
+                    additionalProperties:
+                      description: Service contains server-specific TLS secret
+                      properties:
+                        caMount:
+                          description: CaMount - dst location to mount the CA cert
+                            ca.crt to. Can be used if the service CA cert should be
+                            mounted specifically, e.g. to be set in a service config
+                            for validation, instead of the env wide bundle.
+                          type: string
+                        certMount:
+                          description: CertMount - dst location to mount the service
+                            tls.crt cert. Can be used to override the default location
+                            which is /etc/tls/<service key>/tls.crt
+                          type: string
+                        disableNonTLSListeners:
+                          description: DisableNonTLSListeners - disable non TLS listeners
+                            of the service (if supported)
+                          type: boolean
+                        keyMount:
+                          description: KeyMount - dst location to mount the service
+                            tls.key  key. Can be used to override the default location
+                            which is /etc/tls/<service key>/tls.key
+                          type: string
+                        secretName:
+                          description: / +kubebuilder:validation:Optional SecretName
+                            - holding the cert, key for the service
+                          type: string
+                      type: object
+                    description: certificate configuration for API service certs
+                    type: object
                   ca:
-                    description: Ca contains CA-specific settings, which could be
-                      used both by services (to define their own CA certificates)
-                      and by clients (to verify the server's certificate)
+                    description: CA bundle configuration
                     properties:
-                      caSecretName:
+                      caBundleMount:
+                        default: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+                        description: CaBundleMount - dst location to mount the CA
+                          cert bundle
+                        type: string
+                      caBundleSecretName:
+                        description: CaBundleSecretName - holding the CA certs in
+                          a pre-created bundle file
                         type: string
                     type: object
                   service:
-                    description: Service contains server-specific TLS secret
-                    properties:
-                      disableNonTLSListeners:
-                        type: boolean
-                      secretName:
-                        type: string
+                    additionalProperties:
+                      description: Service contains server-specific TLS secret
+                      properties:
+                        caMount:
+                          description: CaMount - dst location to mount the CA cert
+                            ca.crt to. Can be used if the service CA cert should be
+                            mounted specifically, e.g. to be set in a service config
+                            for validation, instead of the env wide bundle.
+                          type: string
+                        certMount:
+                          description: CertMount - dst location to mount the service
+                            tls.crt cert. Can be used to override the default location
+                            which is /etc/tls/<service key>/tls.crt
+                          type: string
+                        disableNonTLSListeners:
+                          description: DisableNonTLSListeners - disable non TLS listeners
+                            of the service (if supported)
+                          type: boolean
+                        keyMount:
+                          description: KeyMount - dst location to mount the service
+                            tls.key  key. Can be used to override the default location
+                            which is /etc/tls/<service key>/tls.key
+                          type: string
+                        secretName:
+                          description: / +kubebuilder:validation:Optional SecretName
+                            - holding the cert, key for the service
+                          type: string
+                      type: object
+                    description: certificate configuration for additional arbitrary
+                      certs
                     type: object
                 required:
+                - APIService
                 - ca
                 - service
                 type: object

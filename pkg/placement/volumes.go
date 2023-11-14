@@ -56,16 +56,21 @@ func getVolumes(instance *placementv1.PlacementAPI) []corev1.Volume {
 		},
 	}
 
-	if instance.Spec.TLS != nil {
-		// fmt.Printf("Service: %+v\n", *instance.Spec.TLS.Service)       // // For debug
-		// fmt.Printf("Ca: %+v\n", *instance.Spec.TLS.Ca)                 // For debug
-		// fmt.Println("instance.Spec.TLS is set. Adding TLS volumes...") // For debug
-		caVolumes := instance.Spec.TLS.CreateVolumes()
+	if instance.Spec.TLS != nil && instance.Spec.TLS.Service != nil {
+		tls := instance.Spec.TLS
+		for _, service := range tls.Service {
+			serviceVolumes := service.CreateVolumes()
+			volumes = append(volumes, serviceVolumes...)
+		}
+	}
+
+	if instance.Spec.TLS != nil && instance.Spec.TLS.Ca != nil {
+		ca := instance.Spec.TLS.Ca
+		caVolumes := ca.CreateVolumes()
 		volumes = append(volumes, caVolumes...)
 	}
 
 	return volumes
-
 }
 
 // getInitVolumeMounts - general init task VolumeMounts
@@ -88,8 +93,18 @@ func getInitVolumeMounts(instance *placementv1.PlacementAPI) []corev1.VolumeMoun
 		},
 	}
 
-	if instance.Spec.TLS != nil {
-		caVolumeMounts := instance.Spec.TLS.CreateVolumeMounts()
+	// Question: Do we need the tls during the inialization phase?
+	if instance.Spec.TLS != nil && instance.Spec.TLS.Service != nil {
+		tls := instance.Spec.TLS
+		for _, service := range tls.Service {
+			serviceVolumeMounts := service.CreateVolumeMounts()
+			volumeMounts = append(volumeMounts, serviceVolumeMounts...)
+		}
+	}
+
+	if instance.Spec.TLS != nil && instance.Spec.TLS.Ca != nil {
+		ca := instance.Spec.TLS.Ca
+		caVolumeMounts := ca.CreateVolumeMounts()
 		volumeMounts = append(volumeMounts, caVolumeMounts...)
 	}
 
@@ -117,8 +132,17 @@ func getVolumeMounts(instance *placementv1.PlacementAPI) []corev1.VolumeMount {
 		},
 	}
 
-	if instance.Spec.TLS != nil {
-		caVolumeMounts := instance.Spec.TLS.CreateVolumeMounts()
+	if instance.Spec.TLS != nil && instance.Spec.TLS.Service != nil {
+		tls := instance.Spec.TLS
+		for _, service := range tls.Service {
+			serviceVolumeMounts := service.CreateVolumeMounts()
+			volumeMounts = append(volumeMounts, serviceVolumeMounts...)
+		}
+	}
+
+	if instance.Spec.TLS != nil && instance.Spec.TLS.Ca != nil {
+		ca := instance.Spec.TLS.Ca
+		caVolumeMounts := ca.CreateVolumeMounts()
 		volumeMounts = append(volumeMounts, caVolumeMounts...)
 	}
 
