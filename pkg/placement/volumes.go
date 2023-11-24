@@ -56,20 +56,6 @@ func getVolumes(instance *placementv1.PlacementAPI) []corev1.Volume {
 		},
 	}
 
-	if instance.Spec.TLS != nil && instance.Spec.TLS.Service != nil {
-		tls := instance.Spec.TLS
-		for _, service := range tls.Service {
-			serviceVolumes := service.CreateVolumes()
-			volumes = append(volumes, serviceVolumes...)
-		}
-	}
-
-	if instance.Spec.TLS != nil && instance.Spec.TLS.Ca != nil {
-		ca := instance.Spec.TLS.Ca
-		caVolumes := ca.CreateVolumes()
-		volumes = append(volumes, caVolumes...)
-	}
-
 	return volumes
 }
 
@@ -91,21 +77,6 @@ func getInitVolumeMounts(instance *placementv1.PlacementAPI) []corev1.VolumeMoun
 			MountPath: "/var/lib/config-data/merged",
 			ReadOnly:  false,
 		},
-	}
-
-	// Question: Do we need the tls during the inialization phase?
-	if instance.Spec.TLS != nil && instance.Spec.TLS.Service != nil {
-		tls := instance.Spec.TLS
-		for _, service := range tls.Service {
-			serviceVolumeMounts := service.CreateVolumeMounts()
-			volumeMounts = append(volumeMounts, serviceVolumeMounts...)
-		}
-	}
-
-	if instance.Spec.TLS != nil && instance.Spec.TLS.Ca != nil {
-		ca := instance.Spec.TLS.Ca
-		caVolumeMounts := ca.CreateVolumeMounts()
-		volumeMounts = append(volumeMounts, caVolumeMounts...)
 	}
 
 	return volumeMounts
@@ -130,20 +101,6 @@ func getVolumeMounts(instance *placementv1.PlacementAPI) []corev1.VolumeMount {
 			SubPath:   "placement-api-config.json",
 			ReadOnly:  true,
 		},
-	}
-
-	if instance.Spec.TLS != nil && instance.Spec.TLS.Service != nil {
-		tls := instance.Spec.TLS
-		for _, service := range tls.Service {
-			serviceVolumeMounts := service.CreateVolumeMounts()
-			volumeMounts = append(volumeMounts, serviceVolumeMounts...)
-		}
-	}
-
-	if instance.Spec.TLS != nil && instance.Spec.TLS.Ca != nil {
-		ca := instance.Spec.TLS.Ca
-		caVolumeMounts := ca.CreateVolumeMounts()
-		volumeMounts = append(volumeMounts, caVolumeMounts...)
 	}
 
 	return volumeMounts

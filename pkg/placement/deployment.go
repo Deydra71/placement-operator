@@ -16,9 +16,14 @@ limitations under the License.
 package placement
 
 import (
+	"context"
+
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	affinity "github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 
 	placementv1 "github.com/openstack-k8s-operators/placement-operator/api/v1beta1"
 
@@ -35,10 +40,13 @@ const (
 
 // Deployment func
 func Deployment(
+	ctx context.Context,
+	helper *helper.Helper,
 	instance *placementv1.PlacementAPI,
 	configHash string,
 	labels map[string]string,
 	annotations map[string]string,
+	tlsEndptCfgMap map[service.Endpoint]tls.Service,
 ) *appsv1.Deployment {
 	runAsUser := int64(0)
 
@@ -80,11 +88,36 @@ func Deployment(
 		readinessProbe.HTTPGet = &corev1.HTTPGetAction{
 			Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(PlacementPublicPort)},
 		}
+
+		if instance.Spec.TLS.API.Enabled() {
+			livenessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
+			readinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
+		}
 	}
 
 	envVars := map[string]env.Setter{}
 	envVars["KOLLA_CONFIG_STRATEGY"] = env.SetValue("COPY_ALWAYS")
 	envVars["CONFIG_HASH"] = env.SetValue(configHash)
+
+	// create Volume and VolumeMounts
+	volumes := getVolumes(instance)
+	volumeMounts := getVolumeMounts(instance)
+	initVolumeMounts := getInitVolumeMounts(instance)
+
+	// add CA cert if defined
+	if instance.Spec.TLS.API.Enabled() {
+		// Validate endpoint cert secrets
+		volumes = append(volumes, instance.Spec.TLS.CreateVolume())
+		volumeMounts = append(volumeMounts, instance.Spec.TLS.CreateVolumeMounts(nil)...)
+		initVolumeMounts = append(initVolumeMounts, instance.Spec.TLS.CreateVolumeMounts(nil)...)
+
+		// add service cert Volumes and VolumeMounts
+		for endpt, tlsEndptCfg := range tlsEndptCfgMap {
+			volumes = append(volumes, tlsEndptCfg.CreateVolume(endpt.String()))
+			volumeMounts = append(volumeMounts, tlsEndptCfg.CreateVolumeMounts(endpt.String())...)
+			initVolumeMounts = append(initVolumeMounts, tlsEndptCfg.CreateVolumeMounts(endpt.String())...)
+		}
+	}
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -103,6 +136,7 @@ func Deployment(
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: instance.RbacResourceName(),
+					Volumes:            volumes,
 					Containers: []corev1.Container{
 						{
 							Name: ServiceName + "-api",

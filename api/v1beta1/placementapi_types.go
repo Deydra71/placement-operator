@@ -118,8 +118,8 @@ type PlacementAPISpec struct {
 	Override APIOverrideSpec `json:"override,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// Service certificates and CA certificates bundle file for internal TLS traffic
-	TLS *tls.TLS `json:"tls,omitempty"`
+	// TLS - Parameters related to the TLS
+	TLS tls.API `json:"tls,omitempty"`
 }
 
 // APIOverrideSpec to override the generated manifest of several child resources.
