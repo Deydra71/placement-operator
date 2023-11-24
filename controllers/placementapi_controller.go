@@ -902,11 +902,10 @@ func (r *PlacementAPIReconciler) generateServiceConfigMaps(
 	templateParameters["KeystoneInternalURL"] = keystoneInternalURL
 	templateParameters["KeystonePublicURL"] = keystonePublicURL
 
-	placementEndpoints := getPlacementEndpoints(instance.Spec.APIType)
 	httpdVhostConfig := map[string]interface{}{}
-	for endpt := range placementEndpoints {
+	for _, endpt := range []service.Endpoint{service.EndpointInternal, service.EndpointPublic} {
 		endptConfig := map[string]interface{}{}
-		endptConfig["ServerName"] = fmt.Sprintf("placement-%s.%s.svc", endpt.String(), instance.Namespace)
+		endptConfig["ServerName"] = fmt.Sprintf("placements-%s.%s.svc", endpt.String(), instance.Namespace)
 		endptConfig["TLS"] = false // default TLS to false, and set it bellow to true if enabled
 		if instance.Spec.TLS.API.Enabled() {
 			endptConfig["TLS"] = true
@@ -915,6 +914,8 @@ func (r *PlacementAPIReconciler) generateServiceConfigMaps(
 		}
 		httpdVhostConfig[endpt.String()] = endptConfig
 	}
+
+	templateParameters["VHosts"] = httpdVhostConfig
 
 	cms := []util.Template{
 		// ScriptsConfigMap
@@ -962,29 +963,4 @@ func (r *PlacementAPIReconciler) createHashOfInputHashes(
 		Log.Info(fmt.Sprintf("Input maps hash %s - %s", common.InputHashName, hash))
 	}
 	return hash, changed, nil
-}
-
-// getPlacementEndpoints - returns the Placement endpoints map based on the apiType of the Placement-api
-// default is split, in case of single both internal and public endpoint get returned
-func getPlacementEndpoints(apiType string) map[service.Endpoint]endpoint.Data {
-	placementEndpoints := map[service.Endpoint]endpoint.Data{}
-	// split
-	if apiType == placementv1.APIInternal {
-		placementEndpoints[service.EndpointInternal] = endpoint.Data{
-			Port: placement.PlacementInternalPort,
-		}
-	} else {
-		placementEndpoints[service.EndpointPublic] = endpoint.Data{
-			Port: placement.PlacementPublicPort,
-		}
-	}
-	// if we're not splitting the API and deploying a single instance, we have
-	// to add both internal and public endpoints
-	if apiType == placementv1.APISingle {
-		placementEndpoints[service.EndpointInternal] = endpoint.Data{
-			Port: placement.PlacementInternalPort,
-		}
-	}
-
-	return placementEndpoints
 }
