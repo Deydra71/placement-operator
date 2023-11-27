@@ -280,7 +280,8 @@ func (r *PlacementAPIReconciler) reconcileInit(
 	serviceLabels map[string]string,
 	serviceAnnotations map[string]string,
 ) (map[service.Endpoint]tls.Service, ctrl.Result, error) {
-	r.Log.Info("Reconciling Service init")
+	Log := r.GetLogger(ctx)
+	Log.Info("Reconciling Service init")
 	tlsEndptCfgMap := make(map[service.Endpoint]tls.Service)
 	// Service account, role, binding
 	rbacRules := []rbacv1.PolicyRule{
@@ -605,7 +606,7 @@ func (r *PlacementAPIReconciler) reconcileInit(
 
 	// run placement db sync - end
 
-	r.Log.Info("Reconciled Service init successfully")
+	Log.Info("Reconciled Service init successfully")
 	return tlsEndptCfgMap, ctrl.Result{}, nil
 }
 
