@@ -105,3 +105,5 @@ replace ( //allow-merging
 	sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.14.7
 	sigs.k8s.io/gateway-api => sigs.k8s.io/gateway-api v0.6.0
 )
+
+replace github.com/openstack-k8s-operators/lib-common/modules/common/tls => ../lib-common/modules/common/tls
