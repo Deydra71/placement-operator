@@ -73,3 +73,17 @@ require (
 // mschuppert: map to latest commit from release-4.13 tag
 // must consistent within modules and service operators
 replace github.com/openshift/api => github.com/openshift/api v0.0.0-20230414143018-3367bc7e6ac7 //allow-merging
+
+replace ( //allow-merging
+	github.com/cert-manager/cert-manager => github.com/cert-manager/cert-manager v1.11.5
+	github.com/google/gnostic => github.com/google/gnostic v0.6.9
+	// pin to k8s 0.26.x for now
+	k8s.io/api => k8s.io/api v0.26.11
+	k8s.io/apimachinery => k8s.io/apimachinery v0.26.11
+	k8s.io/client-go => k8s.io/client-go v0.26.11
+	k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20230327201221-f5883ff37f0c
+	sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.14.7
+	sigs.k8s.io/gateway-api => sigs.k8s.io/gateway-api v0.6.0
+)
+
+replace github.com/openstack-k8s-operators/lib-common/modules/common => ../lib-common/modules/common

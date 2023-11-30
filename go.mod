@@ -106,4 +106,4 @@ replace ( //allow-merging
 	sigs.k8s.io/gateway-api => sigs.k8s.io/gateway-api v0.6.0
 )
 
-replace github.com/openstack-k8s-operators/lib-common/modules/common/tls => ../lib-common/modules/common/tls
+replace github.com/openstack-k8s-operators/lib-common/modules/common => ../lib-common/modules/common
