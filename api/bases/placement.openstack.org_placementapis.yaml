@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.11.1
+    controller-gen.kubebuilder.io/version: v0.10.0
   creationTimestamp: null
   name: placementapis.placement.openstack.org
 spec:
@@ -365,6 +365,33 @@ spec:
                 description: ServiceUser - optional username used for this service
                   to register in keystone
                 type: string
+              tls:
+                description: TLS - Parameters related to the TLS
+                properties:
+                  api:
+                    description: API tls type which encapsulates for API services
+                    properties:
+                      disabled:
+                        description: Disabled TLS for the deployment of the service
+                        type: boolean
+                      endpoint:
+                        additionalProperties:
+                          description: GenericService contains server-specific TLS
+                            secret or issuer
+                          properties:
+                            secretName:
+                              description: SecretName - holding the cert, key for
+                                the service
+                              type: string
+                          type: object
+                        description: The key must be the endpoint type (public, internal)
+                        type: object
+                    type: object
+                  caBundleSecretName:
+                    description: CaBundleSecretName - holding the CA certs in a pre-created
+                      bundle file
+                    type: string
+                type: object
             required:
             - containerImage
             - databaseInstance

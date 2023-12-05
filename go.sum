@@ -33,6 +33,7 @@ cloud.google.com/go/storage v1.10.0/go.mod h1:FLPqc6j+Ki4BU591ie1oL6qBQGu2Bl/tZ9
 dmitri.shuralyov.com/gpu/mtl v0.0.0-20190408044501-666a987793e9/go.mod h1:H6x//7gZCb22OMCxBHrMx7a5I7Hp++hsVxbQ4BYO7hU=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
+github.com/Deydra71/lib-common/modules/common v0.0.0-20231204140814-3719cbd23dc5 h1:5+xXZONbkUa2QBbqtyvABRuUazwRs9e5UgJgK3vQ6Oc=
 github.com/OneOfOne/xxhash v1.2.2/go.mod h1:HSdplMjZKSmBqAxg5vPj2TmRDmfkzw+cTzAElWljhcU=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
 github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
@@ -236,8 +237,6 @@ github.com/openshift/api v0.0.0-20230414143018-3367bc7e6ac7 h1:rncLxJBpFGqBztyxC
 github.com/openshift/api v0.0.0-20230414143018-3367bc7e6ac7/go.mod h1:ctXNyWanKEjGj8sss1KjjHQ3ENKFm33FFnS5BKaIPh4=
 github.com/openstack-k8s-operators/keystone-operator/api v0.3.1-0.20231128185906-0b4579c3dadf h1:Omn04tJTZlNOXIszGurB8XfpbsGf+6LIn86BaN9XRDs=
 github.com/openstack-k8s-operators/keystone-operator/api v0.3.1-0.20231128185906-0b4579c3dadf/go.mod h1:kDtQ2LCkf28F7xgK8GBFAMPDhXnL6iRb8NztHhrYaO0=
-github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20231204114424-a857120974fc h1:zI2B70A0Czwgd0zUu6zojwucXuLokGjbw0UxF36tNlc=
-github.com/openstack-k8s-operators/lib-common/modules/common v0.3.1-0.20231204114424-a857120974fc/go.mod h1:9n2nMFDiV5hGZHKr81aTAOHUoAxvEKivHeWCXFRJEZ4=
 github.com/openstack-k8s-operators/lib-common/modules/openstack v0.3.1-0.20231204114424-a857120974fc h1:/6JrCMdnw/P03vXMqrA7cfeTlXiFJDoZzKzmJI4/rgM=
 github.com/openstack-k8s-operators/lib-common/modules/openstack v0.3.1-0.20231204114424-a857120974fc/go.mod h1:SfdtKhpn1MGom0ZEOsgY27QFu+7SdDhO/LiuDe5cDXk=
 github.com/openstack-k8s-operators/lib-common/modules/test v0.3.1-0.20231204114424-a857120974fc h1:72uWWPgxg5ImFYEQ2XyL0RFmG+sOjzyz7R4nM5p0DzM=

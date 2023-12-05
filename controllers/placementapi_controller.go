@@ -22,7 +22,9 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -44,6 +46,7 @@ import (
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	util "github.com/openstack-k8s-operators/lib-common/modules/common/util"
 
 	mariadbv1 "github.com/openstack-k8s-operators/mariadb-operator/api/v1beta1"
@@ -364,7 +367,7 @@ func (r *PlacementAPIReconciler) reconcileInit(
 
 	for endpointType, data := range placementEndpoints {
 		endpointTypeStr := string(endpointType)
-		endpointName := placement.ServiceName + "-" + endpointTypeStr
+		endpointName := instance.Name + "-" + endpointTypeStr
 
 		svcOverride := instance.Spec.Override.Service[endpointType]
 		if svcOverride.EmbeddedLabelsAnnotations == nil {
@@ -403,6 +406,12 @@ func (r *PlacementAPIReconciler) reconcileInit(
 				err.Error()))
 
 			return ctrl.Result{}, err
+		}
+
+		// if TLS is enabled
+		if _, ok := instance.Spec.TLS.API.Endpoint[endpointType]; ok && instance.Spec.TLS.API.Enabled() {
+			// set endpoint protocol to https
+			data.Protocol = ptr.To(service.ProtocolHTTPS)
 		}
 
 		svc.AddAnnotation(map[string]string{
@@ -617,6 +626,9 @@ func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *
 	// Create ConfigMaps and Secrets required as input for the Service and calculate an overall hash of hashes
 	//
 
+	// TODO: should create cert secret before creating the ServiceConfigMaps, otherwise we'll have another job runs
+	// since config changes
+
 	//
 	// create Configmap required for placement input
 	// - %-scripts configmap holding scripts to e.g. bootstrap the service
@@ -634,10 +646,52 @@ func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
+	// TLS input validation
+	//
+	if instance.Spec.TLS.API.Enabled() {
+		// Validate the CA cert secret if provided
+		if instance.Spec.TLS.CaBundleSecretName != "" {
+			hash, ctrlResult, err := tls.ValidateCACertSecret(
+				ctx,
+				helper.GetClient(),
+				types.NamespacedName{
+					Name:      instance.Spec.TLS.CaBundleSecretName,
+					Namespace: instance.Namespace,
+				},
+			)
+			if err != nil {
+				return ctrlResult, err
+			} else if (ctrlResult != ctrl.Result{}) {
+				return ctrlResult, nil
+			}
+
+			if hash != "" {
+				configMapVars[tls.CABundleKey] = env.SetValue(hash)
+			}
+		}
+
+		// TODO validate cert secrets
+		/*
+			certsHash, ctrlResult, err := tls.ValidateEndpointCerts(
+				ctx,
+				helper,
+				instance.Namespace,
+				instance.Spec.TLS.API.Endpoint,
+			)
+			if err != nil {
+				return ctrlResult, err
+			} else if (ctrlResult != ctrl.Result{}) {
+				return ctrlResult, nil
+			}
+			configMapVars[tls.TLSHashName] = env.SetValue(certsHash)
+		*/
+	}
+
 	//
 	// create hash over all the different input resources to identify if any those changed
 	// and a restart/recreate is required.
 	//
+	//inputEnvMap := util.MergeMaps(configMapVars, initEnvVars)
 	inputHash, hashChanged, err := r.createHashOfInputHashes(ctx, instance, configMapVars)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -654,7 +708,8 @@ func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *
 	//
 
 	serviceLabels := map[string]string{
-		common.AppSelector: placement.ServiceName,
+		common.AppSelector:   placement.ServiceName,
+		common.OwnerSelector: instance.Name,
 	}
 
 	// networks to attach to
@@ -715,8 +770,14 @@ func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *
 	//
 
 	// Define a new Deployment object
-	deplDef := placement.Deployment(instance, inputHash, serviceLabels, serviceAnnotations)
+	deplDef, err := placement.Deployment(ctx, helper, instance, inputHash, serviceLabels, serviceAnnotations)
 	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.DeploymentReadyErrorMessage,
+			err.Error()))
 		return ctrl.Result{}, err
 	}
 	depl := deployment.NewDeployment(
@@ -815,6 +876,21 @@ func (r *PlacementAPIReconciler) generateServiceConfigMaps(
 	templateParameters["ServiceUser"] = instance.Spec.ServiceUser
 	templateParameters["KeystoneInternalURL"] = keystoneInternalURL
 	templateParameters["KeystonePublicURL"] = keystonePublicURL
+
+	// create httpd  vhost template parameters
+	httpdVhostConfig := map[string]interface{}{}
+	for _, endpt := range []service.Endpoint{service.EndpointInternal, service.EndpointPublic} {
+		endptConfig := map[string]interface{}{}
+		endptConfig["ServerName"] = fmt.Sprintf("placement-%s.%s.svc", endpt.String(), instance.Namespace)
+		endptConfig["TLS"] = false // default TLS to false, and set it bellow to true if enabled
+		if instance.Spec.TLS.API.Enabled() {
+			endptConfig["TLS"] = true
+			endptConfig["SSLCertificateFile"] = fmt.Sprintf("/etc/pki/tls/certs/%s.crt", endpt.String())
+			endptConfig["SSLCertificateKeyFile"] = fmt.Sprintf("/etc/pki/tls/private/%s.key", endpt.String())
+		}
+		httpdVhostConfig[endpt.String()] = endptConfig
+	}
+	templateParameters["VHosts"] = httpdVhostConfig
 
 	cms := []util.Template{
 		// ScriptsConfigMap
