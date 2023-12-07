@@ -1,45 +1,14 @@
-apiVersion: placement.openstack.org/v1beta1
-kind: PlacementAPI
+apiVersion: v1
+kind: Secret
 metadata:
-  name: placement
-spec:
-  tls:
-    api:
-      internal:
-        secretName: cert-internal-svc
-      public:
-        secretName: cert-public-svc
-    caBundleSecretName: combined-ca-bundle
+  name: cert-internal-svc
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Secret
 metadata:
-  name: placement
-spec:
-  replicas: 1
-  template:
-    metadata:
-      labels:
-        service: keystone
-    spec:
-      containers:
-        volumeMounts:
-          - mountPath: /var/lib/config-data/tls/certs/internal.crt
-            name: internal-tls-certs
-            readOnly: true
-            subPath: tls.crt
-          - mountPath: /var/lib/config-data/tls/private/internal.key
-            name: internal-tls-certs
-            readOnly: true
-            subPath: tls.key
-          - mountPath: /var/lib/config-data/tls/certs/public.crt
-            name: public-tls-certs
-            readOnly: true
-            subPath: tls.crt
-          - mountPath: /var/lib/config-data/tls/private/public.key
-            name: public-tls-certs
-            readOnly: true
-            subPath: tls.key
-          - mountPath: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-            name: combined-ca-bundle
-            readOnly: true
+  name: cert-public-svc
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: combined-ca-bundle

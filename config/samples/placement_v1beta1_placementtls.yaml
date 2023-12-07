@@ -1,7 +1,7 @@
 apiVersion: placement.openstack.org/v1beta1
 kind: PlacementAPI
 metadata:
-  name: placement-tls
+  name: placement
 spec:
   serviceUser: placement
   customServiceConfig: |
