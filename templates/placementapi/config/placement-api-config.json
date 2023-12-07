@@ -20,6 +20,12 @@
             "perm": "0644"
         },
         {
+            "source": "/var/lib/config-data/merged/ssl.conf",
+            "dest": "/etc/httpd/conf.d/ssl.conf",
+            "owner": "root",
+            "perm": "0644"
+        },
+        {
             "source": "/var/lib/config-data/merged/logging.conf",
             "dest": "/etc/placement/logging.conf",
             "owner": "placement",

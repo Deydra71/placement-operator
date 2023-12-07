@@ -30,6 +30,7 @@ import (
 )
 
 var _ = Describe("PlacementAPI controller", func() {
+
 	BeforeEach(func() {
 		// lib-common uses OPERATOR_TEMPLATES env var to locate the "templates"
 		// directory of the operator. We need to set them othervise lib-common
@@ -379,7 +380,7 @@ var _ = Describe("PlacementAPI controller", func() {
 
 			deployment := th.GetDeployment(names.DeploymentName)
 			Expect(int(*deployment.Spec.Replicas)).To(Equal(1))
-			Expect(deployment.Spec.Selector.MatchLabels).To(Equal(map[string]string{"service": "placement"}))
+			Expect(deployment.Spec.Selector.MatchLabels).To(Equal(map[string]string{"service": "placement", "owner": names.PlacementAPIName.Name}))
 			Expect(deployment.Spec.Template.Spec.ServiceAccountName).To(Equal(names.ServiceAccountName.Name))
 			th.SimulateDeploymentReplicaReady(names.DeploymentName)
 
@@ -681,5 +682,50 @@ var _ = Describe("PlacementAPI controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 
+	})
+
+	When("A PlacementAPI is created with TLS", func() {
+		BeforeEach(func() {
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateCABundleSecret(names.CaBundleSecretName))
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateCertSecret(names.InternalCertSecretName))
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateCertSecret(names.PublicCertSecretName))
+			DeferCleanup(
+				th.DeleteInstance,
+				CreatePlacementAPI(names.PlacementAPIName, GetTLSPlacementAPISpec()),
+			)
+			DeferCleanup(keystone.DeleteKeystoneAPI, keystone.CreateKeystoneAPI(namespace))
+			DeferCleanup(
+				k8sClient.Delete, ctx, CreatePlacementAPISecret(namespace, SecretName))
+
+			spec := GetTLSPlacementAPISpec()
+			placement := CreatePlacementAPI(names.PlacementAPIName, spec)
+
+			serviceSpec := corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 3306}}}
+			DeferCleanup(
+				mariadb.DeleteDBService,
+				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
+			)
+			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
+			keystone.SimulateKeystoneEndpointReady(names.KeystoneEndpointName)
+			th.SimulateJobSuccess(names.DBSyncJobName)
+			DeferCleanup(th.DeleteInstance, placement)
+		})
+
+		It("it creates deployment with CA and service certs mounted", func() {
+			j := th.GetDeployment(names.DeploymentName)
+
+			// CA bundle
+			th.AssertVolumeExists(names.CaBundleSecretName.Name, j.Spec.Template.Spec.Volumes)
+			th.AssertVolumeMountExists(names.CaBundleSecretName.Name, "tls-ca-bundle.pem", j.Spec.Template.Spec.Containers[0].VolumeMounts)
+
+			// service certs
+			th.AssertVolumeExists(names.InternalCertSecretName.Name, j.Spec.Template.Spec.Volumes)
+			th.AssertVolumeExists(names.PublicCertSecretName.Name, j.Spec.Template.Spec.Volumes)
+			th.AssertVolumeMountExists(names.PublicCertSecretName.Name, "tls.key", j.Spec.Template.Spec.Containers[0].VolumeMounts)
+			th.AssertVolumeMountExists(names.PublicCertSecretName.Name, "tls.crt", j.Spec.Template.Spec.Containers[0].VolumeMounts)
+			th.AssertVolumeMountExists(names.InternalCertSecretName.Name, "tls.key", j.Spec.Template.Spec.Containers[0].VolumeMounts)
+			th.AssertVolumeMountExists(names.InternalCertSecretName.Name, "tls.crt", j.Spec.Template.Spec.Containers[0].VolumeMounts)
+		})
 	})
 })
