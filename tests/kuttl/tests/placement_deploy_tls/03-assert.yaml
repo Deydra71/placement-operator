@@ -39,6 +39,18 @@ spec:
       labels:
         service: placement
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: service
+                  operator: In
+                  values:
+                  - placement
+              topologyKey: kubernetes.io/hostname
+            weight: 1
       containers:
       - args:
         - --single-child
@@ -55,7 +67,7 @@ spec:
           httpGet:
             path: /
             port: 8778
-            scheme: HTTP
+            scheme: HTTPS
           initialDelaySeconds: 3
           periodSeconds: 3
           successThreshold: 1
@@ -66,7 +78,7 @@ spec:
           httpGet:
             path: /
             port: 8778
-            scheme: HTTP
+            scheme: HTTPS
           initialDelaySeconds: 5
           periodSeconds: 5
           successThreshold: 1
@@ -88,72 +100,84 @@ spec:
           subPath: placement-api-config.json
         - mountPath: /var/log/placement
           name: logs
-        - mountPath: /var/lib/config-data/tls/certs
-          name: internal-tls-certs
-          readOnly: true
-          subPath: tls.crt
-        - mountPath: /var/lib/config-data/tls/private
-          name: internal-tls-certs
-          readOnly: true
-          subPath: tls.key
-        - mountPath: /var/lib/config-data/tls/certs
-          name: public-tls-certs
-          readOnly: true
-          subPath: tls.crt
-        - mountPath: /var/lib/config-data/tls/private
-          name: public-tls-certs
-          readOnly: true
-          subPath: tls.key
-        - mountPath: /etc/pki/ca-trust/extracted/pem
-          name: combined-ca-bundle
-          readOnly: true
-          subPath: tls-ca-bundle.pem      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      
-      containers:
-      - args:
-        - -c
-        - /usr/local/bin/kolla_set_configs && /usr/local/bin/kolla_start
-        volumeMounts:
-        - mountPath: /var/lib/config-data/tls/certs
-          name: internal-tls-certs
-          readOnly: true
-          subPath: tls.crt
-        - mountPath: /var/lib/config-data/tls/private
-          name: internal-tls-certs
-          readOnly: true
-          subPath: tls.key
-        - mountPath: /var/lib/config-data/tls/certs
-          name: public-tls-certs
-          readOnly: true
-          subPath: tls.crt
-        - mountPath: /var/lib/config-data/tls/private
-          name: public-tls-certs
-          readOnly: true
-          subPath: tls.key
-        - mountPath: /etc/pki/ca-trust/extracted/pem
+        - mountPath: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
           name: combined-ca-bundle
           readOnly: true
           subPath: tls-ca-bundle.pem
+        - mountPath: /var/lib/config-data/tls/certs/internal.crt
+          name: internal-tls-certs
+          readOnly: true
+          subPath: tls.crt
+        - mountPath: /var/lib/config-data/tls/private/internal.key
+          name: internal-tls-certs
+          readOnly: true
+          subPath: tls.key
+        - mountPath: /var/lib/config-data/tls/certs/public.crt
+          name: public-tls-certs
+          readOnly: true
+          subPath: tls.crt
+        - mountPath: /var/lib/config-data/tls/private/public.key
+          name: public-tls-certs
+          readOnly: true
+          subPath: tls.key
+      - args:
+        - -c
+        - /usr/local/bin/kolla_start
+        command:
+        - /bin/bash
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 8778
+            scheme: HTTPS
+          initialDelaySeconds: 3
+          periodSeconds: 3
+          successThreshold: 1
+          timeoutSeconds: 5
+        name: placement-api
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 8778
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources: {}
+      initContainers:
+      - args:
+        - -c
+        - /usr/local/bin/container-scripts/init.sh
+        command:
+        - /bin/bash
+        env:
+        - name: DatabasePassword
+          valueFrom:
+            secretKeyRef:
+              key: PlacementDatabasePassword
+              name: osp-secret
+        - name: PlacementPassword
+          valueFrom:
+            secretKeyRef:
+              key: PlacementPassword
+              name: osp-secret
+        - name: DatabaseHost
+          value: openstack
+        - name: DatabaseName
+          value: placement
+        - name: DatabaseUser
+          value: placement
+        imagePullPolicy: IfNotPresent
+        name: init
+        resources: {}
+      restartPolicy: Always
+      securityContext: {}
+      serviceAccount: placement-placement
+      serviceAccountName: placement-placement
+status:
+  availableReplicas: 1
+  replicas: 1

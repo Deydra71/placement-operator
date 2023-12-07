@@ -139,11 +139,6 @@ func Deployment(
 				Spec: corev1.PodSpec{
 					ServiceAccountName: instance.RbacResourceName(),
 					Volumes:            volumes,
-					SecurityContext: &corev1.PodSecurityContext{
-						// since we run as PlacementUserID, e.g. certs need to be
-						// readable by the placement user, instead of root
-						FSGroup: ptr.To(PlacementUserID),
-					},
 					Containers: []corev1.Container{
 						{
 							Name: ServiceName + "-log",
