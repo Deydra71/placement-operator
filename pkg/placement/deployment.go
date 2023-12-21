@@ -158,7 +158,7 @@ func Deployment(
 								RunAsUser: ptr.To(PlacementUserID),
 							},
 							Env:            env.MergeEnvs([]corev1.EnvVar{}, envVars),
-							VolumeMounts:   getVolumeMounts("api"),
+							VolumeMounts:   volumeMounts,
 							Resources:      instance.Spec.Resources,
 							ReadinessProbe: readinessProbe,
 							LivenessProbe:  livenessProbe,
