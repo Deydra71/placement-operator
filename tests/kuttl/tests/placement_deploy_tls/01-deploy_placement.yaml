@@ -1,7 +1,7 @@
 apiVersion: placement.openstack.org/v1beta1
 kind: PlacementAPI
 metadata:
-  name: placement-tls
+  name: placement
 spec:
   serviceUser: placement
   customServiceConfig: |
@@ -15,6 +15,10 @@ spec:
   preserveJobs: false
   replicas: 1
   secret: placement-secret
+  # resources:
+  #   requests:
+  #     memory: "500Mi"
+  #     cpu: "1.0"
   tls:
     api:
       internal:
