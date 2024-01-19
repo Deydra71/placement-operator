@@ -70,27 +70,11 @@ spec:
                   DB, defaults to placement TODO: -> implement needs work in mariadb-operator,
                   right now only placement'
                 type: string
-              debug:
-                description: Debug - enable debug for different deploy stages. If
-                  an init container is used, it runs and the actual action pod gets
-                  started with sleep infinity
-                properties:
-                  dbSync:
-                    default: false
-                    description: DBSync enable debug
-                    type: boolean
-                  service:
-                    default: false
-                    description: Service enable debug
-                    type: boolean
-                type: object
               defaultConfigOverwrite:
                 additionalProperties:
                   type: string
-                description: 'ConfigOverwrite - interface to overwrite default config
-                  files like e.g. policy.json. But can also be used to add additional
-                  files. Those get added to the service config dir in /etc/<service>
-                  . TODO: -> implement'
+                description: DefaultConfigOverwrite - interface to overwrite default
+                  config files like policy.yaml.
                 type: object
               networkAttachments:
                 description: NetworkAttachments is a list of NetworkAttachment resource
@@ -353,7 +337,8 @@ spec:
                     description: 'Requests describes the minimum amount of compute
                       resources required. If Requests is omitted for a container,
                       it defaults to Limits if that is explicitly specified, otherwise
-                      to an implementation-defined value. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                      to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
                     type: object
                 type: object
               secret:

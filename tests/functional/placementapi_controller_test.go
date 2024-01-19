@@ -87,6 +87,24 @@ var _ = Describe("PlacementAPI controller", func() {
 				condition.InputReadyCondition,
 				corev1.ConditionFalse,
 			)
+			th.ExpectCondition(
+				names.PlacementAPIName,
+				ConditionGetterFunc(PlacementConditionGetter),
+				condition.RoleBindingReadyCondition,
+				corev1.ConditionTrue,
+			)
+			th.ExpectCondition(
+				names.PlacementAPIName,
+				ConditionGetterFunc(PlacementConditionGetter),
+				condition.RoleReadyCondition,
+				corev1.ConditionTrue,
+			)
+			th.ExpectCondition(
+				names.PlacementAPIName,
+				ConditionGetterFunc(PlacementConditionGetter),
+				condition.ServiceAccountReadyCondition,
+				corev1.ConditionTrue,
+			)
 			unknownConditions := []condition.Type{
 				condition.DBReadyCondition,
 				condition.DBSyncReadyCondition,
@@ -96,14 +114,12 @@ var _ = Describe("PlacementAPI controller", func() {
 				condition.KeystoneServiceReadyCondition,
 				condition.KeystoneEndpointReadyCondition,
 				condition.NetworkAttachmentsReadyCondition,
-				condition.ServiceAccountReadyCondition,
-				condition.RoleReadyCondition,
-				condition.RoleBindingReadyCondition,
+				condition.TLSInputReadyCondition,
 			}
 
 			placement := GetPlacementAPI(names.PlacementAPIName)
-			// +2 as InputReady and Ready is False asserted above
-			Expect(placement.Status.Conditions).To(HaveLen(len(unknownConditions) + 2))
+			// +5 as InputReady, Ready, Service and Role are ready is False asserted above
+			Expect(placement.Status.Conditions).To(HaveLen(len(unknownConditions) + 5))
 
 			for _, cond := range unknownConditions {
 				th.ExpectCondition(
@@ -113,6 +129,40 @@ var _ = Describe("PlacementAPI controller", func() {
 					corev1.ConditionUnknown,
 				)
 			}
+		})
+	})
+
+	When("starts zero replicas", func() {
+		BeforeEach(func() {
+			spec := GetDefaultPlacementAPISpec()
+			spec["replicas"] = 0
+			DeferCleanup(
+				th.DeleteInstance,
+				CreatePlacementAPI(names.PlacementAPIName, spec),
+			)
+			DeferCleanup(
+				k8sClient.Delete, ctx, CreatePlacementAPISecret(namespace, SecretName))
+			keystoneAPIName := keystone.CreateKeystoneAPI(namespace)
+			DeferCleanup(keystone.DeleteKeystoneAPI, keystoneAPIName)
+
+		})
+		It("and deployment is Ready", func() {
+			serviceSpec := corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 3306}}}
+			DeferCleanup(
+				mariadb.DeleteDBService,
+				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
+			)
+			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
+			th.SimulateJobSuccess(names.DBSyncJobName)
+			placement := GetPlacementAPI(names.PlacementAPIName)
+			Expect(*(placement.Spec.Replicas)).Should(Equal(int32(0)))
+			th.ExpectCondition(
+				names.PlacementAPIName,
+				ConditionGetterFunc(PlacementConditionGetter),
+				condition.DeploymentReadyCondition,
+				corev1.ConditionTrue,
+			)
 		})
 	})
 
@@ -137,7 +187,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				names.PlacementAPIName,
 				ConditionGetterFunc(PlacementConditionGetter),
 				condition.InputReadyCondition,
-				corev1.ConditionTrue,
+				corev1.ConditionFalse,
 			)
 		})
 	})
@@ -176,7 +226,12 @@ var _ = Describe("PlacementAPI controller", func() {
 		var keystoneAPI *keystonev1.KeystoneAPI
 
 		BeforeEach(func() {
-			DeferCleanup(th.DeleteInstance, CreatePlacementAPI(names.PlacementAPIName, GetDefaultPlacementAPISpec()))
+			spec := GetDefaultPlacementAPISpec()
+			spec["customServiceConfig"] = "foo = bar"
+			spec["defaultConfigOverwrite"] = map[string]interface{}{
+				"policy.yaml": "\"placement:resource_providers:list\": \"!\"",
+			}
+			DeferCleanup(th.DeleteInstance, CreatePlacementAPI(names.PlacementAPIName, spec))
 			DeferCleanup(
 				k8sClient.Delete, ctx, CreatePlacementAPISecret(namespace, SecretName))
 			keystoneAPIName := keystone.CreateKeystoneAPI(namespace)
@@ -192,15 +247,28 @@ var _ = Describe("PlacementAPI controller", func() {
 				corev1.ConditionTrue,
 			)
 		})
-		It("should create a ConfigMap for placement.conf", func() {
-			cm := th.GetConfigMap(names.ConfigMapName)
+		It("should create a configuration Secret", func() {
+			cm := th.GetSecret(names.ConfigMapName)
 
-			Expect(cm.Data["placement.conf"]).Should(
+			conf := cm.Data["placement.conf"]
+			Expect(conf).Should(
 				ContainSubstring("auth_url = %s", keystoneAPI.Status.APIEndpoints["internal"]))
-			Expect(cm.Data["placement.conf"]).Should(
+			Expect(conf).Should(
 				ContainSubstring("www_authenticate_uri = %s", keystoneAPI.Status.APIEndpoints["public"]))
-			Expect(cm.Data["placement.conf"]).Should(
+			Expect(conf).Should(
 				ContainSubstring("username = placement"))
+			Expect(conf).Should(
+				ContainSubstring("password = 12345678"))
+			Expect(conf).Should(
+				ContainSubstring("connection = mysql+pymysql://placement:12345678@/placement"))
+
+			custom := cm.Data["custom.conf"]
+			Expect(custom).Should(ContainSubstring("foo = bar"))
+
+			policy := cm.Data["policy.yaml"]
+			Expect(policy).Should(
+				ContainSubstring("\"placement:resource_providers:list\": \"!\""))
+
 		})
 
 		It("creates service account, role and rolebindig", func() {
@@ -249,12 +317,10 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			db := mariadb.GetMariaDBDatabase(names.MariaDBDatabaseName)
-			// FIXME(gibi): this should be hardcoded to "placement" as this is
-			// the name of the DB schema to be created
-			Expect(db.Spec.Name).To(Equal(names.PlacementAPIName.Name))
-			Expect(db.Spec.Secret).To(Equal(SecretName))
+			Expect(db.Spec.Name).To(Equal(names.MariaDBDatabaseName.Name))
 
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 
 			th.ExpectCondition(
 				names.PlacementAPIName,
@@ -277,6 +343,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 
 			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
 
@@ -301,6 +368,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 
 			keystone.SimulateKeystoneEndpointReady(names.KeystoneEndpointName)
 
@@ -318,6 +386,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 
 			th.ExpectCondition(
 				names.PlacementAPIName,
@@ -327,27 +396,8 @@ var _ = Describe("PlacementAPI controller", func() {
 			)
 
 			job := th.GetJob(names.DBSyncJobName)
-			Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(4))
-			Expect(job.Spec.Template.Spec.InitContainers).To(HaveLen(1))
+			Expect(job.Spec.Template.Spec.Volumes).To(HaveLen(3))
 			Expect(job.Spec.Template.Spec.Containers).To(HaveLen(1))
-
-			init := job.Spec.Template.Spec.InitContainers[0]
-			Expect(init.VolumeMounts).To(HaveLen(4))
-			Expect(init.Args[1]).To(ContainSubstring("init.sh"))
-			Expect(init.Image).To(Equal("quay.io/podified-antelope-centos9/openstack-placement-api:current-podified"))
-			env := &corev1.EnvVar{}
-			Expect(init.Env).To(ContainElement(HaveField("Name", "DatabaseHost"), env))
-			Expect(env.Value).To(Equal("hostname-for-openstack"))
-			Expect(init.Env).To(ContainElement(HaveField("Name", "DatabaseUser"), env))
-			Expect(env.Value).To(Equal("placement"))
-			Expect(init.Env).To(ContainElement(HaveField("Name", "DatabaseName"), env))
-			Expect(env.Value).To(Equal("placement"))
-			Expect(init.Env).To(ContainElement(HaveField("Name", "DatabasePassword"), env))
-			Expect(env.ValueFrom.SecretKeyRef.LocalObjectReference.Name).To(Equal(SecretName))
-			Expect(env.ValueFrom.SecretKeyRef.Key).To(Equal("PlacementDatabasePassword"))
-			Expect(init.Env).To(ContainElement(HaveField("Name", "PlacementPassword"), env))
-			Expect(env.ValueFrom.SecretKeyRef.LocalObjectReference.Name).To(Equal(SecretName))
-			Expect(env.ValueFrom.SecretKeyRef.Key).To(Equal("PlacementPassword"))
 
 			container := job.Spec.Template.Spec.Containers[0]
 			Expect(container.VolumeMounts).To(HaveLen(4))
@@ -369,6 +419,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 			th.SimulateJobSuccess(names.DBSyncJobName)
 
 			th.ExpectCondition(
@@ -407,6 +458,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 			th.SimulateJobSuccess(names.DBSyncJobName)
 			th.SimulateDeploymentReplicaReady(names.DeploymentName)
 
@@ -437,6 +489,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
 			keystone.SimulateKeystoneEndpointReady(names.KeystoneEndpointName)
 			th.SimulateJobSuccess(names.DBSyncJobName)
@@ -493,6 +546,7 @@ var _ = Describe("PlacementAPI controller", func() {
 			)
 
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 			th.SimulateJobSuccess(names.DBSyncJobName)
 			th.SimulateDeploymentReplicaReady(names.DeploymentName)
 			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
@@ -564,6 +618,7 @@ var _ = Describe("PlacementAPI controller", func() {
 			)
 
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 			th.SimulateJobSuccess(names.DBSyncJobName)
 			th.SimulateDeploymentReplicaReady(names.DeploymentName)
 			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
@@ -599,6 +654,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
 			keystone.SimulateKeystoneEndpointReady(names.KeystoneEndpointName)
 			th.SimulateJobSuccess(names.DBSyncJobName)
@@ -621,6 +677,8 @@ var _ = Describe("PlacementAPI controller", func() {
 			Expect(keystoneEndpoint.Finalizers).To(ContainElement("PlacementAPI"))
 			db := mariadb.GetMariaDBDatabase(names.MariaDBDatabaseName)
 			Expect(db.Finalizers).To(ContainElement("PlacementAPI"))
+			acc := mariadb.GetMariaDBAccount(names.MariaDBDatabaseName)
+			Expect(acc.Finalizers).To(ContainElement("PlacementAPI"))
 
 			th.DeleteInstance(GetPlacementAPI(names.PlacementAPIName))
 
@@ -630,13 +688,15 @@ var _ = Describe("PlacementAPI controller", func() {
 			Expect(keystoneEndpoint.Finalizers).NotTo(ContainElement("PlacementAPI"))
 			db = mariadb.GetMariaDBDatabase(names.MariaDBDatabaseName)
 			Expect(db.Finalizers).NotTo(ContainElement("PlacementAPI"))
+			acc = mariadb.GetMariaDBAccount(names.MariaDBDatabaseName)
+			Expect(acc.Finalizers).NotTo(ContainElement("PlacementAPI"))
 		})
 
 		It("updates the deployment if configuration changes", func() {
 			deployment := th.GetDeployment(names.DeploymentName)
 			oldConfigHash := GetEnvVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "CONFIG_HASH", "")
 			Expect(oldConfigHash).NotTo(Equal(""))
-			cm := th.GetConfigMap(names.ConfigMapName)
+			cm := th.GetSecret(names.ConfigMapName)
 			Expect(cm.Data["custom.conf"]).ShouldNot(ContainSubstring("debug"))
 
 			Eventually(func(g Gomega) {
@@ -652,7 +712,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				g.Expect(newConfigHash).NotTo(Equal(""))
 				g.Expect(newConfigHash).NotTo(Equal(oldConfigHash))
 
-				cm := th.GetConfigMap(names.ConfigMapName)
+				cm := th.GetSecret(names.ConfigMapName)
 				g.Expect(cm.Data["custom.conf"]).Should(ContainSubstring("debug = true"))
 			}, timeout, interval).Should(Succeed())
 		})
@@ -671,14 +731,7 @@ var _ = Describe("PlacementAPI controller", func() {
 			Eventually(func(g Gomega) {
 				deployment := th.GetDeployment(names.DeploymentName)
 				newConfigHash := GetEnvVarValue(deployment.Spec.Template.Spec.Containers[0].Env, "CONFIG_HASH", "")
-				g.Expect(newConfigHash).NotTo(Equal(""))
-				// FIXME(gibi): The placement-operator does not watch the input
-				// secret so it does not detect that any input is changed.
-				// Also the password values are not calculated into the input
-				// hash as they are only applied in the init container
-				// This should pass when this is fixed
-				// g.Expect(newConfigHash).NotTo(Equal(oldConfigHash))
-				g.Expect(newConfigHash).To(Equal(oldConfigHash))
+				g.Expect(newConfigHash).NotTo(Equal(oldConfigHash))
 				// TODO(gibi): once the password is in the generated config
 				// assert it there
 			}, timeout, interval).Should(Succeed())
@@ -691,12 +744,13 @@ var _ = Describe("PlacementAPI controller", func() {
 			DeferCleanup(k8sClient.Delete, ctx, th.CreateCABundleSecret(names.CaBundleSecretName))
 			DeferCleanup(k8sClient.Delete, ctx, th.CreateCertSecret(names.InternalCertSecretName))
 			DeferCleanup(k8sClient.Delete, ctx, th.CreateCertSecret(names.PublicCertSecretName))
-			DeferCleanup(th.DeleteInstance, CreatePlacementAPI(names.PlacementAPIName, GetTLSPlacementAPISpec()))
+
+			spec := GetTLSPlacementAPISpec(names)
+			placement := CreatePlacementAPI(names.PlacementAPIName, spec)
+			DeferCleanup(th.DeleteInstance, placement)
+
 			DeferCleanup(keystone.DeleteKeystoneAPI, keystone.CreateKeystoneAPI(namespace))
 			DeferCleanup(k8sClient.Delete, ctx, CreatePlacementAPISecret(namespace, SecretName))
-
-			spec := GetTLSPlacementAPISpec()
-			placement := CreatePlacementAPI(names.PlacementAPIName, spec)
 
 			serviceSpec := corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 3306}}}
 			DeferCleanup(
@@ -704,6 +758,7 @@ var _ = Describe("PlacementAPI controller", func() {
 				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
 			)
 			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
 			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
 			keystone.SimulateKeystoneEndpointReady(names.KeystoneEndpointName)
 			th.SimulateJobSuccess(names.DBSyncJobName)
@@ -730,7 +785,7 @@ var _ = Describe("PlacementAPI controller", func() {
 			Expect(container.ReadinessProbe.HTTPGet.Scheme).To(Equal(corev1.URISchemeHTTPS))
 			Expect(container.LivenessProbe.HTTPGet.Scheme).To(Equal(corev1.URISchemeHTTPS))
 
-			configDataMap := th.GetConfigMap(names.ConfigMapName)
+			configDataMap := th.GetSecret(names.ConfigMapName)
 			Expect(configDataMap).ShouldNot(BeNil())
 			Expect(configDataMap.Data).Should(HaveKey("httpd.conf"))
 			Expect(configDataMap.Data).Should(HaveKey("ssl.conf"))
@@ -741,5 +796,66 @@ var _ = Describe("PlacementAPI controller", func() {
 			Expect(configData).Should(ContainSubstring("SSLCertificateFile      \"/etc/pki/tls/certs/public.crt\""))
 			Expect(configData).Should(ContainSubstring("SSLCertificateKeyFile   \"/etc/pki/tls/private/public.key\""))
 		})
+	})
+})
+
+var _ = Describe("PlacementAPI reconfiguration", func() {
+	BeforeEach(func() {
+		err := os.Setenv("OPERATOR_TEMPLATES", "../../templates")
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	When("TLS certs are reconfigured", func() {
+		BeforeEach(func() {
+
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateCABundleSecret(names.CaBundleSecretName))
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateCertSecret(names.InternalCertSecretName))
+			DeferCleanup(k8sClient.Delete, ctx, th.CreateCertSecret(names.PublicCertSecretName))
+			DeferCleanup(th.DeleteInstance, CreatePlacementAPI(names.PlacementAPIName, GetTLSPlacementAPISpec(names)))
+			DeferCleanup(keystone.DeleteKeystoneAPI, keystone.CreateKeystoneAPI(namespace))
+			DeferCleanup(k8sClient.Delete, ctx, CreatePlacementAPISecret(namespace, SecretName))
+
+			spec := GetTLSPlacementAPISpec(names)
+			placement := CreatePlacementAPI(names.PlacementAPIName, spec)
+
+			serviceSpec := corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 3306}}}
+			DeferCleanup(
+				mariadb.DeleteDBService,
+				mariadb.CreateDBService(namespace, "openstack", serviceSpec),
+			)
+			mariadb.SimulateMariaDBDatabaseCompleted(names.MariaDBDatabaseName)
+			mariadb.SimulateMariaDBAccountCompleted(names.MariaDBDatabaseName)
+			keystone.SimulateKeystoneServiceReady(names.KeystoneServiceName)
+			keystone.SimulateKeystoneEndpointReady(names.KeystoneEndpointName)
+			th.SimulateJobSuccess(names.DBSyncJobName)
+			DeferCleanup(th.DeleteInstance, placement)
+			th.SimulateDeploymentReplicaReady(names.DeploymentName)
+
+			th.ExpectCondition(
+				names.PlacementAPIName,
+				ConditionGetterFunc(PlacementConditionGetter),
+				condition.ReadyCondition,
+				corev1.ConditionTrue,
+			)
+		})
+
+		It("reconfigures the API pod", func() {
+			// Grab the current config hash
+			originalHash := GetEnvVarValue(
+				th.GetDeployment(names.DeploymentName).Spec.Template.Spec.Containers[0].Env, "CONFIG_HASH", "")
+			Expect(originalHash).NotTo(BeEmpty())
+
+			// Change the content of the CA secret
+			th.UpdateSecret(names.CaBundleSecretName, "tls-ca-bundle.pem", []byte("DifferentCAData"))
+
+			// Assert that the deployment is updated
+			Eventually(func(g Gomega) {
+				newHash := GetEnvVarValue(
+					th.GetDeployment(names.DeploymentName).Spec.Template.Spec.Containers[0].Env, "CONFIG_HASH", "")
+				g.Expect(newHash).NotTo(BeEmpty())
+				g.Expect(newHash).NotTo(Equal(originalHash))
+			}, timeout, interval).Should(Succeed())
+		})
+
 	})
 })

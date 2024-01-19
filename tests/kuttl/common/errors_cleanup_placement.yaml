@@ -70,7 +70,7 @@ spec:
   type: ClusterIP
 ---
 apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
   labels:
     placement.openstack.org/name: placement
@@ -82,7 +82,7 @@ metadata:
     name: placement
 ---
 apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
   labels:
     placement.openstack.org/name: placement

@@ -22,35 +22,25 @@ import (
 // getVolumes - service volumes
 func getVolumes(name string) []corev1.Volume {
 	var scriptsVolumeDefaultMode int32 = 0755
-	var config0640AccessMode int32 = 0640
+	var configMode int32 = 0640
 
 	return []corev1.Volume{
 		{
 			Name: "scripts",
 			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
+				Secret: &corev1.SecretVolumeSource{
 					DefaultMode: &scriptsVolumeDefaultMode,
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: name + "-scripts",
-					},
+					SecretName:  name + "-scripts",
 				},
 			},
 		},
 		{
 			Name: "config-data",
 			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					DefaultMode: &config0640AccessMode,
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: name + "-config-data",
-					},
+				Secret: &corev1.SecretVolumeSource{
+					DefaultMode: &configMode,
+					SecretName:  name + "-config-data",
 				},
-			},
-		},
-		{
-			Name: "config-data-merged",
-			VolumeSource: corev1.VolumeSource{
-				EmptyDir: &corev1.EmptyDirVolumeSource{Medium: ""},
 			},
 		},
 		{
@@ -63,32 +53,6 @@ func getVolumes(name string) []corev1.Volume {
 
 }
 
-// getInitVolumeMounts - general init task VolumeMounts
-func getInitVolumeMounts() []corev1.VolumeMount {
-	return []corev1.VolumeMount{
-		{
-			Name:      "scripts",
-			MountPath: "/usr/local/bin/container-scripts",
-			ReadOnly:  true,
-		},
-		{
-			Name:      "config-data",
-			MountPath: "/var/lib/config-data/default",
-			ReadOnly:  true,
-		},
-		{
-			Name:      "config-data-merged",
-			MountPath: "/var/lib/config-data/merged",
-			ReadOnly:  false,
-		},
-		{
-			Name:      "logs",
-			MountPath: "/var/log/placement",
-			ReadOnly:  false,
-		},
-	}
-}
-
 // getVolumeMounts - general VolumeMounts
 func getVolumeMounts(serviceName string) []corev1.VolumeMount {
 	return []corev1.VolumeMount{
@@ -98,20 +62,20 @@ func getVolumeMounts(serviceName string) []corev1.VolumeMount {
 			ReadOnly:  true,
 		},
 		{
-			Name:      "config-data-merged",
-			MountPath: "/var/lib/config-data/merged",
-			ReadOnly:  false,
-		},
-		{
-			Name:      "config-data-merged",
-			MountPath: "/var/lib/kolla/config_files/config.json",
-			SubPath:   "placement-" + serviceName + "-config.json",
-			ReadOnly:  true,
-		},
-		{
 			Name:      "logs",
 			MountPath: "/var/log/placement",
 			ReadOnly:  false,
+		},
+		{
+			Name:      "config-data",
+			MountPath: "/var/lib/openstack/config",
+			ReadOnly:  false,
+		},
+		{
+			Name:      "config-data",
+			MountPath: "/var/lib/kolla/config_files/config.json",
+			SubPath:   "placement-" + serviceName + "-config.json",
+			ReadOnly:  true,
 		},
 	}
 }

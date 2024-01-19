@@ -25,6 +25,7 @@ import (
 
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
 	placementv1 "github.com/openstack-k8s-operators/placement-operator/api/v1beta1"
+	"github.com/openstack-k8s-operators/placement-operator/pkg/placement"
 )
 
 type Names struct {
@@ -53,17 +54,15 @@ func CreateNames(placementAPIName types.NamespacedName) Names {
 		ConfigMapName: types.NamespacedName{
 			Namespace: placementAPIName.Namespace,
 			Name:      placementAPIName.Name + "-config-data"},
-		// FIXME(gibi): the db sync job name should not be hardcoded
-		// but based on the name of the PlacementAPI CR
 		DBSyncJobName: types.NamespacedName{
 			Namespace: placementAPIName.Namespace,
-			Name:      "placement-db-sync"},
-		MariaDBDatabaseName: placementAPIName,
-		// FIXME(gibi): the deployment name should not be hardcoded
-		// but based on the name of the PlacementAPI CR
+			Name:      placementAPIName.Name + "-db-sync"},
+		MariaDBDatabaseName: types.NamespacedName{
+			Namespace: placementAPIName.Namespace,
+			Name:      placement.DatabaseName},
 		DeploymentName: types.NamespacedName{
 			Namespace: placementAPIName.Namespace,
-			Name:      "placement"},
+			Name:      placementAPIName.Name},
 		PublicServiceName: types.NamespacedName{
 			Namespace: placementAPIName.Namespace,
 			Name:      "placement-public"},
@@ -104,7 +103,7 @@ func GetDefaultPlacementAPISpec() map[string]interface{} {
 	}
 }
 
-func GetTLSPlacementAPISpec() map[string]interface{} {
+func GetTLSPlacementAPISpec(names Names) map[string]interface{} {
 	return map[string]interface{}{
 		"databaseInstance": "openstack",
 		"replicas":         1,
@@ -112,13 +111,13 @@ func GetTLSPlacementAPISpec() map[string]interface{} {
 		"tls": map[string]interface{}{
 			"api": map[string]interface{}{
 				"internal": map[string]interface{}{
-					"secretName": InternalCertSecretName,
+					"secretName": names.InternalCertSecretName.Name,
 				},
 				"public": map[string]interface{}{
-					"secretName": PublicCertSecretName,
+					"secretName": names.PublicCertSecretName.Name,
 				},
 			},
-			"caBundleSecretName": CABundleSecretName,
+			"caBundleSecretName": names.CaBundleSecretName.Name,
 		},
 	}
 }

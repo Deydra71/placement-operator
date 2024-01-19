@@ -54,7 +54,7 @@ OPERATOR_SDK_VERSION ?= v1.31.0
 DEFAULT_IMG ?= quay.io/openstack-k8s-operators/placement-operator:latest
 IMG ?= $(DEFAULT_IMG)
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.26
+ENVTEST_K8S_VERSION = 1.28
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -126,9 +126,13 @@ run: manifests generate fmt vet ## Run a controller from your host.
 	/bin/bash hack/clean_local_webhook.sh
 	go run ./main.go -metrics-bind-address ":$(METRICS_PORT)" -health-probe-bind-address ":$(HEALTH_PORT)"
 
+
+# Extra vars which will be passed to the Docker-build
+DOCKER_BUILD_ARGS ?=
+
 .PHONY: docker-build
-docker-build: test ## Build docker image with the manager.
-	podman build -t ${IMG} .
+docker-build: ## Build docker image with the manager.
+	podman build -t ${IMG} . ${DOCKER_BUILD_ARGS}
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.

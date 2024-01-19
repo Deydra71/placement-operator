@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,14 +35,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/go-logr/logr"
 	keystonev1 "github.com/openstack-k8s-operators/keystone-operator/api/v1beta1"
 
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	condition "github.com/openstack-k8s-operators/lib-common/modules/common/condition"
-	configmap "github.com/openstack-k8s-operators/lib-common/modules/common/configmap"
 	deployment "github.com/openstack-k8s-operators/lib-common/modules/common/deployment"
 	endpoint "github.com/openstack-k8s-operators/lib-common/modules/common/endpoint"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
@@ -50,7 +49,7 @@ import (
 	labels "github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
-	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/service"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
 	util "github.com/openstack-k8s-operators/lib-common/modules/common/util"
@@ -67,9 +66,130 @@ import (
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 )
 
+type conditionUpdater interface {
+	Set(c *condition.Condition)
+	MarkTrue(t condition.Type, messageFormat string, messageArgs ...interface{})
+}
+
+type GetSecret interface {
+	GetSecret() string
+	client.Object
+}
+
+// ensureSecret - ensures that the Secret object exists and the expected fields
+// are in the Secret. It returns a hash of the values of the expected fields.
+func ensureSecret(
+	ctx context.Context,
+	secretName types.NamespacedName,
+	expectedFields []string,
+	reader client.Reader,
+	conditionUpdater conditionUpdater,
+) (string, ctrl.Result, corev1.Secret, error) {
+	secret := &corev1.Secret{}
+	err := reader.Get(ctx, secretName, secret)
+	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			conditionUpdater.Set(condition.FalseCondition(
+				condition.InputReadyCondition,
+				condition.RequestedReason,
+				condition.SeverityInfo,
+				fmt.Sprintf("Input data resources missing: %s", "secret/"+secretName.Name)))
+			return "",
+				ctrl.Result{},
+				*secret,
+				fmt.Errorf("Secret %s not found", secretName)
+		}
+		conditionUpdater.Set(condition.FalseCondition(
+			condition.InputReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.InputReadyErrorMessage,
+			err.Error()))
+		return "", ctrl.Result{}, *secret, err
+	}
+
+	// collect the secret values the caller expects to exist
+	values := [][]byte{}
+	for _, field := range expectedFields {
+		val, ok := secret.Data[field]
+		if !ok {
+			err := fmt.Errorf("field '%s' not found in secret/%s", field, secretName.Name)
+			conditionUpdater.Set(condition.FalseCondition(
+				condition.InputReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.InputReadyErrorMessage,
+				err.Error()))
+			return "", ctrl.Result{}, *secret, err
+		}
+		values = append(values, val)
+	}
+
+	// TODO(gibi): Do we need to watch the Secret for changes?
+
+	hash, err := util.ObjectHash(values)
+	if err != nil {
+		conditionUpdater.Set(condition.FalseCondition(
+			condition.InputReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.InputReadyErrorMessage,
+			err.Error()))
+		return "", ctrl.Result{}, *secret, err
+	}
+
+	return hash, ctrl.Result{}, *secret, nil
+}
+
 // GetLog returns a logger object with a prefix of "controller.name" and additional controller context fields
 func (r *PlacementAPIReconciler) GetLogger(ctx context.Context) logr.Logger {
 	return log.FromContext(ctx).WithName("Controllers").WithName("PlacementAPI")
+}
+
+func (r *PlacementAPIReconciler) GetSecretMapperFor(crs client.ObjectList, ctx context.Context) func(client.Object) []reconcile.Request {
+	Log := r.GetLogger(ctx)
+	mapper := func(secret client.Object) []reconcile.Request {
+		var namespace string = secret.GetNamespace()
+		var secretName string = secret.GetName()
+		result := []reconcile.Request{}
+
+		listOpts := []client.ListOption{
+			client.InNamespace(namespace),
+		}
+		if err := r.Client.List(ctx, crs, listOpts...); err != nil {
+			Log.Error(err, "Unable to retrieve the list of CRs")
+			panic(err)
+		}
+
+		err := apimeta.EachListItem(crs, func(o runtime.Object) error {
+			// NOTE(gibi): intentionally let the failed cast panic to catch
+			// this implementation error as soon as possible.
+			cr := o.(GetSecret)
+			if cr.GetSecret() == secretName {
+				name := client.ObjectKey{
+					Namespace: namespace,
+					Name:      cr.GetName(),
+				}
+				Log.Info(
+					"Requesting reconcile due to secret change",
+					"Secret", secretName, "CR", name.Name,
+				)
+				result = append(result, reconcile.Request{NamespacedName: name})
+			}
+			return nil
+		})
+		if err != nil {
+			Log.Error(err, "Unable to iterate the list of CRs")
+			panic(err)
+		}
+
+		if len(result) > 0 {
+			return result
+		}
+		return nil
+	}
+
+	return mapper
 }
 
 // PlacementAPIReconciler reconciles a PlacementAPI object
@@ -89,6 +209,9 @@ type PlacementAPIReconciler struct {
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete;
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete;
 // +kubebuilder:rbac:groups=mariadb.openstack.org,resources=mariadbdatabases,verbs=get;list;watch;create;update;patch;delete;
+// +kubebuilder:rbac:groups=mariadb.openstack.org,resources=mariadbdatabases/finalizers,verbs=update
+// +kubebuilder:rbac:groups=mariadb.openstack.org,resources=mariadbaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=mariadb.openstack.org,resources=mariadbaccounts/finalizers,verbs=update
 // +kubebuilder:rbac:groups=keystone.openstack.org,resources=keystoneapis,verbs=get;list;watch;
 // +kubebuilder:rbac:groups=keystone.openstack.org,resources=keystoneservices,verbs=get;list;watch;create;update;patch;delete;
 // +kubebuilder:rbac:groups=keystone.openstack.org,resources=keystoneendpoints,verbs=get;list;watch;create;update;patch;delete;
@@ -114,13 +237,15 @@ func (r *PlacementAPIReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			// Request object not found, could have been deleted after reconcile request.
 			// Owned objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers. Return and don't requeue.
+			Log.Info("Placement instance not found, probably deleted before reconciled. Nothing to do.")
 			return ctrl.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
+		Log.Error(err, "Failed to read the Placement instance.")
 		return ctrl.Result{}, err
 	}
 
-	helper, err := helper.NewHelper(
+	h, err := helper.NewHelper(
 		instance,
 		r.Client,
 		r.Kclient,
@@ -128,6 +253,11 @@ func (r *PlacementAPIReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Log,
 	)
 	if err != nil {
+		Log.Error(err, "Failed to create lib-common Helper")
+		return ctrl.Result{}, err
+	}
+	// initialize status fields
+	if err = r.initStatus(ctx, h, instance); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -145,7 +275,7 @@ func (r *PlacementAPIReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			instance.Status.Conditions.Set(
 				instance.Status.Conditions.Mirror(condition.ReadyCondition))
 		}
-		err := helper.PatchInstance(ctx, instance)
+		err := h.PatchInstance(ctx, instance)
 		if err != nil {
 			_err = err
 			return
@@ -153,38 +283,426 @@ func (r *PlacementAPIReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}()
 
 	// If we're not deleting this and the service object doesn't have our finalizer, add it.
-	if instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, helper.GetFinalizer()) {
+	if instance.DeletionTimestamp.IsZero() && controllerutil.AddFinalizer(instance, h.GetFinalizer()) {
 		return ctrl.Result{}, nil
 	}
 
+	// Handle service delete
+	if !instance.DeletionTimestamp.IsZero() {
+		return r.reconcileDelete(ctx, instance, h)
+	}
+	// Service account, role, binding
+	rbacRules := []rbacv1.PolicyRule{
+		{
+			APIGroups:     []string{"security.openshift.io"},
+			ResourceNames: []string{"anyuid"},
+			Resources:     []string{"securitycontextconstraints"},
+			Verbs:         []string{"use"},
+		},
+		{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"create", "get", "list", "watch", "update", "patch", "delete"},
+		},
+	}
+	rbacResult, err := common_rbac.ReconcileRbac(ctx, h, instance, rbacRules)
+	if err != nil {
+		return rbacResult, err
+	} else if (rbacResult != ctrl.Result{}) {
+		return rbacResult, nil
+	}
+
+	// ConfigMap
+	configMapVars := make(map[string]env.Setter)
+
 	//
-	// initialize status
+	// check for required OpenStack secret holding passwords for service/admin user and add hash to the vars map
 	//
-	if instance.Status.Conditions == nil {
-		instance.Status.Conditions = condition.Conditions{}
-		// initialize conditions used later as Status=Unknown
-		cl := condition.CreateList(
-			condition.UnknownCondition(condition.DBReadyCondition, condition.InitReason, condition.DBReadyInitMessage),
-			condition.UnknownCondition(condition.DBSyncReadyCondition, condition.InitReason, condition.DBSyncReadyInitMessage),
-			condition.UnknownCondition(condition.ExposeServiceReadyCondition, condition.InitReason, condition.ExposeServiceReadyInitMessage),
-			condition.UnknownCondition(condition.InputReadyCondition, condition.InitReason, condition.InputReadyInitMessage),
-			condition.UnknownCondition(condition.ServiceConfigReadyCondition, condition.InitReason, condition.ServiceConfigReadyInitMessage),
-			condition.UnknownCondition(condition.DeploymentReadyCondition, condition.InitReason, condition.DeploymentReadyInitMessage),
-			// right now we have no dedicated KeystoneServiceReadyInitMessage and KeystoneEndpointReadyInitMessage
-			condition.UnknownCondition(condition.KeystoneServiceReadyCondition, condition.InitReason, ""),
-			condition.UnknownCondition(condition.KeystoneEndpointReadyCondition, condition.InitReason, ""),
-			condition.UnknownCondition(condition.NetworkAttachmentsReadyCondition, condition.InitReason, condition.NetworkAttachmentsReadyInitMessage),
-			// service account, role, rolebinding conditions
-			condition.UnknownCondition(condition.ServiceAccountReadyCondition, condition.InitReason, condition.ServiceAccountReadyInitMessage),
-			condition.UnknownCondition(condition.RoleReadyCondition, condition.InitReason, condition.RoleReadyInitMessage),
-			condition.UnknownCondition(condition.RoleBindingReadyCondition, condition.InitReason, condition.RoleBindingReadyInitMessage),
+	hash, result, secret, err := ensureSecret(
+		ctx,
+		types.NamespacedName{Namespace: instance.Namespace, Name: instance.Spec.Secret},
+		[]string{
+			instance.Spec.PasswordSelectors.Service,
+			instance.Spec.PasswordSelectors.Database,
+		},
+		h.GetClient(),
+		&instance.Status.Conditions)
+	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.InputReadyCondition,
+				condition.RequestedReason,
+				condition.SeverityInfo,
+				condition.InputReadyWaitingMessage))
+			return ctrl.Result{RequeueAfter: time.Second * 10}, fmt.Errorf("OpenStack secret %s not found", instance.Spec.Secret)
+		}
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.InputReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.InputReadyErrorMessage,
+			err.Error()))
+		return result, err
+	}
+	configMapVars[instance.Spec.Secret] = env.SetValue(hash)
+
+	// all our input checks out so report InputReady
+	instance.Status.Conditions.MarkTrue(condition.InputReadyCondition, condition.InputReadyMessage)
+
+	err = r.generateServiceConfigMaps(ctx, h, instance, secret, &configMapVars)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.ServiceConfigReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.ServiceConfigReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+
+	// TLS input validation
+	//
+	// Validate the CA cert secret if provided
+	if instance.Spec.TLS.CaBundleSecretName != "" {
+		hash, ctrlResult, err := tls.ValidateCACertSecret(
+			ctx,
+			h.GetClient(),
+			types.NamespacedName{
+				Name:      instance.Spec.TLS.CaBundleSecretName,
+				Namespace: instance.Namespace,
+			},
+		)
+		if err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.TLSInputReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.TLSInputErrorMessage,
+				err.Error()))
+			return ctrlResult, err
+		} else if (ctrlResult != ctrl.Result{}) {
+			return ctrlResult, nil
+		}
+
+		if hash != "" {
+			configMapVars[tls.CABundleKey] = env.SetValue(hash)
+		}
+	}
+
+	// Validate API service certs secrets
+	certsHash, ctrlResult, err := instance.Spec.TLS.API.ValidateCertSecrets(ctx, h, instance.Namespace)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.TLSInputReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.TLSInputErrorMessage,
+			err.Error()))
+		return ctrlResult, err
+	} else if (ctrlResult != ctrl.Result{}) {
+		return ctrlResult, nil
+	}
+	configMapVars[tls.TLSHashName] = env.SetValue(certsHash)
+
+	instance.Status.Conditions.MarkTrue(condition.TLSInputReadyCondition, condition.InputReadyMessage)
+
+	// create hash over all the different input resources to identify if any those changed
+	// and a restart/recreate is required.
+	//
+	inputHash, hashChanged, err := r.createHashOfInputHashes(ctx, instance, configMapVars)
+	if err != nil {
+		return ctrl.Result{}, err
+	} else if hashChanged {
+		// Hash changed and instance status should be updated (which will be done by main defer func),
+		// so we need to return and reconcile again
+		return ctrl.Result{}, nil
+	}
+
+	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
+
+	serviceAnnotations, result, err := r.ensureNetworkAttachments(ctx, h, instance)
+	if (err != nil || result != ctrl.Result{}) {
+		return result, err
+	}
+
+	result, err = r.ensureDB(ctx, h, instance)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	apiEndpoints, result, err := r.ensureServiceExposed(ctx, h, instance)
+
+	if (err != nil || result != ctrl.Result{}) {
+		// We can ignore RequeueAfter as we are watching the Service resource
+		// but we have to return while waiting for the service to be exposed
+		return ctrl.Result{}, err
+	}
+
+	err = r.ensureKeystoneServiceUser(ctx, h, instance)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	result, err = r.ensureKeystoneEndpoint(ctx, h, instance, apiEndpoints)
+	if (err != nil || result != ctrl.Result{}) {
+		// We can ignore RequeueAfter as we are watching the KeystoneEndpoint resource
+		return ctrl.Result{}, err
+	}
+	result, err = r.ensureDbSync(ctx, instance, h, serviceAnnotations)
+	if (err != nil || result != ctrl.Result{}) {
+		return result, err
+	}
+
+	result, err = r.ensureDeployment(ctx, h, instance, inputHash, serviceAnnotations)
+	if (err != nil || result != ctrl.Result{}) {
+		return result, err
+	}
+
+	// Only expose the service is the deployment succeeded
+	if !instance.Status.Conditions.IsTrue(condition.DeploymentReadyCondition) {
+		Log.Info("Waiting for the Deployment to become Ready before exposing the sevice in Keystone")
+		return ctrl.Result{}, nil
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func getServiceLabels(instance *placementv1.PlacementAPI) map[string]string {
+	return map[string]string{
+		common.AppSelector:   placement.ServiceName,
+		common.OwnerSelector: instance.Name,
+	}
+}
+
+func (r *PlacementAPIReconciler) ensureServiceExposed(
+	ctx context.Context,
+	h *helper.Helper,
+	instance *placementv1.PlacementAPI,
+) (map[string]string, ctrl.Result, error) {
+	placementEndpoints := map[service.Endpoint]endpoint.Data{
+		service.EndpointPublic:   {Port: placement.PlacementPublicPort},
+		service.EndpointInternal: {Port: placement.PlacementInternalPort},
+	}
+	apiEndpoints := make(map[string]string)
+
+	serviceLabels := getServiceLabels(instance)
+	for endpointType, data := range placementEndpoints {
+		endpointTypeStr := string(endpointType)
+		endpointName := placement.ServiceName + "-" + endpointTypeStr
+
+		svcOverride := instance.Spec.Override.Service[endpointType]
+		if svcOverride.EmbeddedLabelsAnnotations == nil {
+			svcOverride.EmbeddedLabelsAnnotations = &service.EmbeddedLabelsAnnotations{}
+		}
+
+		exportLabels := util.MergeStringMaps(
+			serviceLabels,
+			map[string]string{
+				service.AnnotationEndpointKey: endpointTypeStr,
+			},
 		)
 
-		instance.Status.Conditions.Init(&cl)
+		// Create the service
+		svc, err := service.NewService(
+			service.GenericService(&service.GenericServiceDetails{
+				Name:      endpointName,
+				Namespace: instance.Namespace,
+				Labels:    exportLabels,
+				Selector:  serviceLabels,
+				Port: service.GenericServicePort{
+					Name:     endpointName,
+					Port:     data.Port,
+					Protocol: corev1.ProtocolTCP,
+				},
+			}),
+			5,
+			&svcOverride.OverrideSpec,
+		)
+		if err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ExposeServiceReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.ExposeServiceReadyErrorMessage,
+				err.Error()))
 
-		// Register overall status immediately to have an early feedback e.g. in the cli
-		return ctrl.Result{}, nil
+			return apiEndpoints, ctrl.Result{}, err
+		}
+
+		svc.AddAnnotation(map[string]string{
+			service.AnnotationEndpointKey: endpointTypeStr,
+		})
+
+		// add Annotation to whether creating an ingress is required or not
+		if endpointType == service.EndpointPublic && svc.GetServiceType() == corev1.ServiceTypeClusterIP {
+			svc.AddAnnotation(map[string]string{
+				service.AnnotationIngressCreateKey: "true",
+			})
+		} else {
+			svc.AddAnnotation(map[string]string{
+				service.AnnotationIngressCreateKey: "false",
+			})
+			if svc.GetServiceType() == corev1.ServiceTypeLoadBalancer {
+				svc.AddAnnotation(map[string]string{
+					service.AnnotationHostnameKey: svc.GetServiceHostname(), // add annotation to register service name in dnsmasq
+				})
+			}
+		}
+
+		ctrlResult, err := svc.CreateOrPatch(ctx, h)
+		if err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ExposeServiceReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.ExposeServiceReadyErrorMessage,
+				err.Error()))
+
+			return apiEndpoints, ctrlResult, err
+		} else if (ctrlResult != ctrl.Result{}) {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.ExposeServiceReadyCondition,
+				condition.RequestedReason,
+				condition.SeverityInfo,
+				condition.ExposeServiceReadyRunningMessage))
+			return apiEndpoints, ctrlResult, nil
+		}
+		// create service - end
+
+		// if TLS is enabled
+		if instance.Spec.TLS.API.Enabled(endpointType) {
+			// set endpoint protocol to https
+			data.Protocol = ptr.To(service.ProtocolHTTPS)
+		}
+
+		apiEndpoints[string(endpointType)], err = svc.GetAPIEndpoint(
+			svcOverride.EndpointURL, data.Protocol, data.Path)
+		if err != nil {
+			return apiEndpoints, ctrl.Result{}, err
+		}
 	}
+
+	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
+	return apiEndpoints, ctrl.Result{}, nil
+}
+
+func (r *PlacementAPIReconciler) ensureNetworkAttachments(
+	ctx context.Context,
+	h *helper.Helper,
+	instance *placementv1.PlacementAPI,
+) (map[string]string, ctrl.Result, error) {
+	var nadAnnotations map[string]string
+	var err error
+
+	// networks to attach to
+	for _, netAtt := range instance.Spec.NetworkAttachments {
+		_, err := nad.GetNADWithName(ctx, h, netAtt, instance.Namespace)
+		if err != nil {
+			if k8s_errors.IsNotFound(err) {
+				instance.Status.Conditions.Set(condition.FalseCondition(
+					condition.NetworkAttachmentsReadyCondition,
+					condition.RequestedReason,
+					condition.SeverityInfo,
+					condition.NetworkAttachmentsReadyWaitingMessage,
+					netAtt))
+				return nadAnnotations, ctrl.Result{RequeueAfter: time.Second * 10}, fmt.Errorf("network-attachment-definition %s not found", netAtt)
+			}
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.NetworkAttachmentsReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityWarning,
+				condition.NetworkAttachmentsReadyErrorMessage,
+				err.Error()))
+			return nadAnnotations, ctrl.Result{}, err
+		}
+	}
+
+	nadAnnotations, err = nad.CreateNetworksAnnotation(instance.Namespace, instance.Spec.NetworkAttachments)
+	if err != nil {
+		return nadAnnotations, ctrl.Result{}, fmt.Errorf("failed create network annotation from %s: %w",
+			instance.Spec.NetworkAttachments, err)
+	}
+	return nadAnnotations, ctrl.Result{}, nil
+}
+
+func (r *PlacementAPIReconciler) ensureKeystoneServiceUser(
+	ctx context.Context,
+	h *helper.Helper,
+	instance *placementv1.PlacementAPI,
+) error {
+	//
+	// create service and user in keystone - https://docs.openstack.org/placement/latest/install/install-rdo.html#configure-user-and-endpoints
+	//
+	ksSvcSpec := keystonev1.KeystoneServiceSpec{
+		ServiceType:        placement.ServiceName,
+		ServiceName:        placement.ServiceName,
+		ServiceDescription: "Placement Service",
+		Enabled:            true,
+		ServiceUser:        instance.Spec.ServiceUser,
+		Secret:             instance.Spec.Secret,
+		PasswordSelector:   instance.Spec.PasswordSelectors.Service,
+	}
+	serviceLabels := getServiceLabels(instance)
+	ksSvc := keystonev1.NewKeystoneService(ksSvcSpec, instance.Namespace, serviceLabels, time.Duration(10)*time.Second)
+	_, err := ksSvc.CreateOrPatch(ctx, h)
+	if err != nil {
+		return err
+	}
+
+	// mirror the Status, Reason, Severity and Message of the latest keystoneservice condition
+	// into a local condition with the type condition.KeystoneServiceReadyCondition
+	c := ksSvc.GetConditions().Mirror(condition.KeystoneServiceReadyCondition)
+	if c != nil {
+		instance.Status.Conditions.Set(c)
+	}
+
+	return nil
+}
+
+func (r *PlacementAPIReconciler) ensureKeystoneEndpoint(
+	ctx context.Context,
+	h *helper.Helper,
+	instance *placementv1.PlacementAPI,
+	apiEndpoints map[string]string,
+) (ctrl.Result, error) {
+	ksEndptSpec := keystonev1.KeystoneEndpointSpec{
+		ServiceName: placement.ServiceName,
+		Endpoints:   apiEndpoints,
+	}
+	ksEndpt := keystonev1.NewKeystoneEndpoint(
+		placement.ServiceName,
+		instance.Namespace,
+		ksEndptSpec,
+		getServiceLabels(instance),
+		time.Duration(10)*time.Second,
+	)
+	ctrlResult, err := ksEndpt.CreateOrPatch(ctx, h)
+	if err != nil {
+		return ctrlResult, err
+	}
+	// mirror the Status, Reason, Severity and Message of the latest keystoneendpoint condition
+	// into a local condition with the type condition.KeystoneEndpointReadyCondition
+	c := ksEndpt.GetConditions().Mirror(condition.KeystoneEndpointReadyCondition)
+	if c != nil {
+		instance.Status.Conditions.Set(c)
+	}
+
+	if (ctrlResult != ctrl.Result{}) {
+		return ctrlResult, nil
+	}
+
+	return ctrlResult, nil
+}
+
+func (r *PlacementAPIReconciler) initStatus(
+	ctx context.Context, h *helper.Helper, instance *placementv1.PlacementAPI,
+) error {
+	if err := r.initConditions(ctx, h, instance); err != nil {
+		return err
+	}
+
+	// NOTE(gibi): initialize the rest of the status fields here
+	// so that the reconcile loop later can assume they are not nil.
 	if instance.Status.Hash == nil {
 		instance.Status.Hash = map[string]string{}
 	}
@@ -192,13 +710,86 @@ func (r *PlacementAPIReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		instance.Status.NetworkAttachments = map[string][]string{}
 	}
 
-	// Handle service delete
-	if !instance.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, instance, helper)
-	}
+	return nil
+}
 
-	// Handle non-deleted clusters
-	return r.reconcileNormal(ctx, instance, helper)
+func (r *PlacementAPIReconciler) initConditions(
+	ctx context.Context, h *helper.Helper, instance *placementv1.PlacementAPI,
+) error {
+	if instance.Status.Conditions == nil {
+		instance.Status.Conditions = condition.Conditions{}
+		// initialize conditions used later as Status=Unknown
+		cl := condition.CreateList(
+			condition.UnknownCondition(
+				condition.DBReadyCondition,
+				condition.InitReason,
+				condition.DBReadyInitMessage,
+			),
+			condition.UnknownCondition(
+				condition.DBSyncReadyCondition,
+				condition.InitReason,
+				condition.DBSyncReadyInitMessage,
+			),
+			condition.UnknownCondition(
+				condition.ExposeServiceReadyCondition,
+				condition.InitReason,
+				condition.ExposeServiceReadyInitMessage,
+			),
+			condition.UnknownCondition(
+				condition.InputReadyCondition,
+				condition.InitReason,
+				condition.InputReadyInitMessage,
+			),
+			condition.UnknownCondition(
+				condition.ServiceConfigReadyCondition,
+				condition.InitReason,
+				condition.ServiceConfigReadyInitMessage,
+			),
+			condition.UnknownCondition(
+				condition.DeploymentReadyCondition,
+				condition.InitReason,
+				condition.DeploymentReadyInitMessage,
+			),
+			// right now we have no dedicated KeystoneServiceReadyInitMessage and KeystoneEndpointReadyInitMessage
+			condition.UnknownCondition(
+				condition.KeystoneServiceReadyCondition,
+				condition.InitReason,
+				"Service registration not started",
+			),
+			condition.UnknownCondition(
+				condition.KeystoneEndpointReadyCondition,
+				condition.InitReason,
+				"KeystoneEndpoint not created",
+			),
+			condition.UnknownCondition(
+				condition.NetworkAttachmentsReadyCondition,
+				condition.InitReason,
+				condition.NetworkAttachmentsReadyInitMessage,
+			),
+			// service account, role, rolebinding conditions
+			condition.UnknownCondition(
+				condition.ServiceAccountReadyCondition,
+				condition.InitReason,
+				condition.ServiceAccountReadyInitMessage,
+			),
+			condition.UnknownCondition(
+				condition.RoleReadyCondition,
+				condition.InitReason,
+				condition.RoleReadyInitMessage,
+			),
+			condition.UnknownCondition(
+				condition.RoleBindingReadyCondition,
+				condition.InitReason,
+				condition.RoleBindingReadyInitMessage),
+			condition.UnknownCondition(
+				condition.TLSInputReadyCondition,
+				condition.InitReason,
+				condition.InputReadyInitMessage),
+		)
+
+		instance.Status.Conditions.Init(&cl)
+	}
+	return nil
 }
 
 // fields to index to reconcile when change
@@ -209,14 +800,12 @@ const (
 	tlsAPIPublicField       = ".spec.tls.api.public.secretName"
 )
 
-var (
-	allWatchFields = []string{
-		passwordSecretField,
-		caBundleSecretNameField,
-		tlsAPIInternalField,
-		tlsAPIPublicField,
-	}
-)
+var allWatchFields = []string{
+	passwordSecretField,
+	caBundleSecretNameField,
+	tlsAPIInternalField,
+	tlsAPIPublicField,
+}
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PlacementAPIReconciler) SetupWithManager(mgr ctrl.Manager) error {
@@ -271,6 +860,7 @@ func (r *PlacementAPIReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&placementv1.PlacementAPI{}).
 		Owns(&mariadbv1.MariaDBDatabase{}).
+		Owns(&mariadbv1.MariaDBAccount{}).
 		Owns(&keystonev1.KeystoneService{}).
 		Owns(&keystonev1.KeystoneEndpoint{}).
 		Owns(&batchv1.Job{}).
@@ -282,14 +872,14 @@ func (r *PlacementAPIReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Watches(
-			&source.Kind{Type: &corev1.Secret{}},
+			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.findObjectsForSrc),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
 		).
 		Complete(r)
 }
 
-func (r *PlacementAPIReconciler) findObjectsForSrc(src client.Object) []reconcile.Request {
+func (r *PlacementAPIReconciler) findObjectsForSrc(ctx context.Context, src client.Object) []reconcile.Request {
 	requests := []reconcile.Request{}
 
 	l := log.FromContext(context.Background()).WithName("Controllers").WithName("PlacementAPI")
@@ -327,7 +917,7 @@ func (r *PlacementAPIReconciler) reconcileDelete(ctx context.Context, instance *
 	Log.Info("Reconciling Service delete")
 
 	// remove db finalizer before the placement one
-	db, err := mariadbv1.GetDatabaseByName(ctx, helper, instance.Name)
+	db, err := mariadbv1.GetDatabaseByName(ctx, helper, placement.DatabaseName)
 	if err != nil && !k8s_errors.IsNotFound(err) {
 		return ctrl.Result{}, err
 	}
@@ -377,51 +967,27 @@ func (r *PlacementAPIReconciler) reconcileDelete(ctx context.Context, instance *
 	return ctrl.Result{}, nil
 }
 
-func (r *PlacementAPIReconciler) reconcileInit(
+func (r *PlacementAPIReconciler) ensureDB(
 	ctx context.Context,
+	h *helper.Helper,
 	instance *placementv1.PlacementAPI,
-	helper *helper.Helper,
-	serviceLabels map[string]string,
-	serviceAnnotations map[string]string,
 ) (ctrl.Result, error) {
-	Log := r.GetLogger(ctx)
-	Log.Info("Reconciling Service init")
-	// Service account, role, binding
-	rbacRules := []rbacv1.PolicyRule{
-		{
-			APIGroups:     []string{"security.openshift.io"},
-			ResourceNames: []string{"anyuid"},
-			Resources:     []string{"securitycontextconstraints"},
-			Verbs:         []string{"use"},
-		},
-		{
-			APIGroups: []string{""},
-			Resources: []string{"pods"},
-			Verbs:     []string{"create", "get", "list", "watch", "update", "patch", "delete"},
-		},
-	}
-	rbacResult, err := common_rbac.ReconcileRbac(ctx, helper, instance, rbacRules)
-	if err != nil {
-		return rbacResult, err
-	} else if (rbacResult != ctrl.Result{}) {
-		return rbacResult, nil
-	}
-
-	//
-	// create service DB instance
-	//
-	db := mariadbv1.NewDatabase(
-		instance.Name,
+	// (ksambor) should we use  NewDatabaseWithNamespace instead?
+	db := mariadbv1.NewDatabaseWithNamespace(
+		placement.DatabaseName,
 		instance.Spec.DatabaseUser,
 		instance.Spec.Secret,
 		map[string]string{
 			"dbName": instance.Spec.DatabaseInstance,
 		},
+		placement.DatabaseName,
+		instance.Namespace,
 	)
 	// create or patch the DB
-	ctrlResult, err := db.CreateOrPatchDB(
+	ctrlResult, err := db.CreateOrPatchDBByName(
 		ctx,
-		helper,
+		h,
+		instance.Spec.DatabaseInstance,
 	)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
@@ -441,7 +1007,8 @@ func (r *PlacementAPIReconciler) reconcileInit(
 		return ctrlResult, nil
 	}
 	// wait for the DB to be setup
-	ctrlResult, err = db.WaitForDBCreated(ctx, helper)
+	// (ksambor) should we use WaitForDBCreatedWithTimeout instead?
+	ctrlResult, err = db.WaitForDBCreated(ctx, h)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.DBReadyCondition,
@@ -463,181 +1030,19 @@ func (r *PlacementAPIReconciler) reconcileInit(
 	// update Status.DatabaseHostname, used to config the service
 	instance.Status.DatabaseHostname = db.GetDatabaseHostname()
 	instance.Status.Conditions.MarkTrue(condition.DBReadyCondition, condition.DBReadyMessage)
-	// create service DB - end
+	return ctrlResult, nil
+}
 
-	//
-	// expose the service (create service, route and return the created endpoint URLs)
-	//
-	var placementEndpoints = map[service.Endpoint]endpoint.Data{
-		service.EndpointPublic:   {Port: placement.PlacementPublicPort},
-		service.EndpointInternal: {Port: placement.PlacementInternalPort},
-	}
-	apiEndpoints := make(map[string]string)
-
-	for endpointType, data := range placementEndpoints {
-		endpointTypeStr := string(endpointType)
-		endpointName := placement.ServiceName + "-" + endpointTypeStr
-
-		svcOverride := instance.Spec.Override.Service[endpointType]
-		if svcOverride.EmbeddedLabelsAnnotations == nil {
-			svcOverride.EmbeddedLabelsAnnotations = &service.EmbeddedLabelsAnnotations{}
-		}
-
-		exportLabels := util.MergeStringMaps(
-			serviceLabels,
-			map[string]string{
-				service.AnnotationEndpointKey: endpointTypeStr,
-			},
-		)
-
-		// Create the service
-		svc, err := service.NewService(
-			service.GenericService(&service.GenericServiceDetails{
-				Name:      endpointName,
-				Namespace: instance.Namespace,
-				Labels:    exportLabels,
-				Selector:  serviceLabels,
-				Port: service.GenericServicePort{
-					Name:     endpointName,
-					Port:     data.Port,
-					Protocol: corev1.ProtocolTCP,
-				},
-			}),
-			5,
-			&svcOverride.OverrideSpec,
-		)
-		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.ExposeServiceReadyCondition,
-				condition.ErrorReason,
-				condition.SeverityWarning,
-				condition.ExposeServiceReadyErrorMessage,
-				err.Error()))
-
-			return ctrl.Result{}, err
-		}
-
-		svc.AddAnnotation(map[string]string{
-			service.AnnotationEndpointKey: endpointTypeStr,
-		})
-
-		// add Annotation to whether creating an ingress is required or not
-		if endpointType == service.EndpointPublic && svc.GetServiceType() == corev1.ServiceTypeClusterIP {
-			svc.AddAnnotation(map[string]string{
-				service.AnnotationIngressCreateKey: "true",
-			})
-		} else {
-			svc.AddAnnotation(map[string]string{
-				service.AnnotationIngressCreateKey: "false",
-			})
-			if svc.GetServiceType() == corev1.ServiceTypeLoadBalancer {
-				svc.AddAnnotation(map[string]string{
-					service.AnnotationHostnameKey: svc.GetServiceHostname(), // add annotation to register service name in dnsmasq
-				})
-			}
-		}
-
-		ctrlResult, err := svc.CreateOrPatch(ctx, helper)
-		if err != nil {
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.ExposeServiceReadyCondition,
-				condition.ErrorReason,
-				condition.SeverityWarning,
-				condition.ExposeServiceReadyErrorMessage,
-				err.Error()))
-
-			return ctrlResult, err
-		} else if (ctrlResult != ctrl.Result{}) {
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.ExposeServiceReadyCondition,
-				condition.RequestedReason,
-				condition.SeverityInfo,
-				condition.ExposeServiceReadyRunningMessage))
-			return ctrlResult, nil
-		}
-		// create service - end
-
-		// if TLS is enabled
-		if instance.Spec.TLS.API.Enabled(endpointType) {
-			// set endpoint protocol to https
-			data.Protocol = ptr.To(service.ProtocolHTTPS)
-		}
-
-		apiEndpoints[string(endpointType)], err = svc.GetAPIEndpoint(
-			svcOverride.EndpointURL, data.Protocol, data.Path)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	instance.Status.Conditions.MarkTrue(condition.ExposeServiceReadyCondition, condition.ExposeServiceReadyMessage)
-	// expose service - end
-
-	//
-	// create service and user in keystone - https://docs.openstack.org/placement/latest/install/install-rdo.html#configure-user-and-endpoints
-	//
-	ksSvcSpec := keystonev1.KeystoneServiceSpec{
-		ServiceType:        placement.ServiceName,
-		ServiceName:        placement.ServiceName,
-		ServiceDescription: "Placement Service",
-		Enabled:            true,
-		ServiceUser:        instance.Spec.ServiceUser,
-		Secret:             instance.Spec.Secret,
-		PasswordSelector:   instance.Spec.PasswordSelectors.Service,
-	}
-	ksSvc := keystonev1.NewKeystoneService(ksSvcSpec, instance.Namespace, serviceLabels, time.Duration(10)*time.Second)
-	ctrlResult, err = ksSvc.CreateOrPatch(ctx, helper)
-	if err != nil {
-		return ctrlResult, err
-	}
-	// mirror the Status, Reason, Severity and Message of the latest keystoneservice condition
-	// into a local condition with the type condition.KeystoneServiceReadyCondition
-	c := ksSvc.GetConditions().Mirror(condition.KeystoneServiceReadyCondition)
-	if c != nil {
-		instance.Status.Conditions.Set(c)
-	}
-
-	if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
-	}
-
-	//
-	// register endpoints
-	//
-	ksEndptSpec := keystonev1.KeystoneEndpointSpec{
-		ServiceName: placement.ServiceName,
-		Endpoints:   apiEndpoints,
-	}
-	ksEndpt := keystonev1.NewKeystoneEndpoint(
-		placement.ServiceName,
-		instance.Namespace,
-		ksEndptSpec,
-		serviceLabels,
-		time.Duration(10)*time.Second,
-	)
-	ctrlResult, err = ksEndpt.CreateOrPatch(ctx, helper)
-	if err != nil {
-		return ctrlResult, err
-	}
-	// mirror the Status, Reason, Severity and Message of the latest keystoneendpoint condition
-	// into a local condition with the type condition.KeystoneEndpointReadyCondition
-	c = ksEndpt.GetConditions().Mirror(condition.KeystoneEndpointReadyCondition)
-	if c != nil {
-		instance.Status.Conditions.Set(c)
-	}
-
-	if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
-	}
-
-	//
-	// run placement db sync
-	//
+func (r *PlacementAPIReconciler) ensureDbSync(
+	ctx context.Context,
+	instance *placementv1.PlacementAPI,
+	helper *helper.Helper,
+	serviceAnnotations map[string]string,
+) (ctrl.Result, error) {
+	Log := r.GetLogger(ctx)
+	serviceLabels := getServiceLabels(instance)
 	dbSyncHash := instance.Status.Hash[placementv1.DbSyncHash]
 	jobDef := placement.DbSyncJob(instance, serviceLabels, serviceAnnotations)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 	dbSyncjob := job.NewJob(
 		jobDef,
 		placementv1.DbSyncHash,
@@ -645,7 +1050,7 @@ func (r *PlacementAPIReconciler) reconcileInit(
 		time.Duration(5)*time.Second,
 		dbSyncHash,
 	)
-	ctrlResult, err = dbSyncjob.DoJob(
+	ctrlResult, err := dbSyncjob.DoJob(
 		ctx,
 		helper,
 	)
@@ -672,200 +1077,23 @@ func (r *PlacementAPIReconciler) reconcileInit(
 	}
 	instance.Status.Conditions.MarkTrue(condition.DBSyncReadyCondition, condition.DBSyncReadyMessage)
 
-	// run placement db sync - end
-
-	Log.Info("Reconciled Service init successfully")
 	return ctrl.Result{}, nil
 }
 
-func (r *PlacementAPIReconciler) reconcileUpdate(ctx context.Context, instance *placementv1.PlacementAPI, helper *helper.Helper) (ctrl.Result, error) {
-	Log := r.GetLogger(ctx)
-	Log.Info("Reconciling Service update")
-
-	// TODO: should have minor update tasks if required
-	// - delete dbsync hash from status to rerun it?
-
-	Log.Info("Reconciled Service update successfully")
-	return ctrl.Result{}, nil
-}
-
-func (r *PlacementAPIReconciler) reconcileUpgrade(ctx context.Context, instance *placementv1.PlacementAPI, helper *helper.Helper) (ctrl.Result, error) {
-	Log := r.GetLogger(ctx)
-	Log.Info("Reconciling Service update")
-	// TODO: should have major version upgrade tasks
-	// -delete dbsync hash from status to rerun it?
-
-	Log.Info("Reconciled Service upgrade successfully")
-	return ctrl.Result{}, nil
-}
-
-func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *placementv1.PlacementAPI, helper *helper.Helper) (ctrl.Result, error) {
+func (r *PlacementAPIReconciler) ensureDeployment(
+	ctx context.Context,
+	h *helper.Helper,
+	instance *placementv1.PlacementAPI,
+	inputHash string,
+	serviceAnnotations map[string]string,
+) (ctrl.Result, error) {
 	Log := r.GetLogger(ctx)
 	Log.Info("Reconciling Service")
-	// ConfigMap
-	configMapVars := make(map[string]env.Setter)
 
-	//
-	// check for required OpenStack secret holding passwords for service/admin user and add hash to the vars map
-	//
-	ospSecret, hash, err := oko_secret.GetSecret(ctx, helper, instance.Spec.Secret, instance.Namespace)
-	if err != nil {
-		if k8s_errors.IsNotFound(err) {
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.InputReadyCondition,
-				condition.RequestedReason,
-				condition.SeverityInfo,
-				condition.InputReadyWaitingMessage))
-			return ctrl.Result{RequeueAfter: time.Second * 10}, fmt.Errorf("OpenStack secret %s not found", instance.Spec.Secret)
-		}
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.InputReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			condition.InputReadyErrorMessage,
-			err.Error()))
-		return ctrl.Result{}, err
-	}
-	configMapVars[ospSecret.Name] = env.SetValue(hash)
-	instance.Status.Conditions.MarkTrue(condition.InputReadyCondition, condition.InputReadyMessage)
-	// run check OpenStack secret - end
-
-	//
-	// Create ConfigMaps and Secrets required as input for the Service and calculate an overall hash of hashes
-	//
-
-	//
-	// create Configmap required for placement input
-	// - %-scripts configmap holding scripts to e.g. bootstrap the service
-	// - %-config configmap holding minimal placement config required to get the service up, user can add additional files to be added to the service
-	// - parameters which has passwords gets added from the OpenStack secret via the init container
-	//
-	err = r.generateServiceConfigMaps(ctx, helper, instance, &configMapVars)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.ServiceConfigReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			condition.ServiceConfigReadyErrorMessage,
-			err.Error()))
-		return ctrl.Result{}, err
-	}
-
-	// TLS input validation
-	//
-	// Validate the CA cert secret if provided
-	if instance.Spec.TLS.CaBundleSecretName != "" {
-		hash, ctrlResult, err := tls.ValidateCACertSecret(
-			ctx,
-			helper.GetClient(),
-			types.NamespacedName{
-				Name:      instance.Spec.TLS.CaBundleSecretName,
-				Namespace: instance.Namespace,
-			},
-		)
-		if err != nil {
-			return ctrlResult, err
-		} else if (ctrlResult != ctrl.Result{}) {
-			return ctrlResult, nil
-		}
-
-		if hash != "" {
-			configMapVars[tls.CABundleKey] = env.SetValue(hash)
-		}
-	}
-
-	// Validate API service certs secrets
-	certsHash, ctrlResult, err := instance.Spec.TLS.API.ValidateCertSecrets(ctx, helper, instance.Namespace)
-	if err != nil {
-		return ctrlResult, err
-	} else if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
-	}
-	configMapVars[tls.TLSHashName] = env.SetValue(certsHash)
-
-	//
-	// create hash over all the different input resources to identify if any those changed
-	// and a restart/recreate is required.
-	//
-	inputHash, hashChanged, err := r.createHashOfInputHashes(ctx, instance, configMapVars)
-	if err != nil {
-		return ctrl.Result{}, err
-	} else if hashChanged {
-		// Hash changed and instance status should be updated (which will be done by main defer func),
-		// so we need to return and reconcile again
-		return ctrl.Result{}, nil
-	}
-	instance.Status.Conditions.MarkTrue(condition.ServiceConfigReadyCondition, condition.ServiceConfigReadyMessage)
-	// Create ConfigMaps and Secrets - end
-
-	//
-	// TODO check when/if Init, Update, or Upgrade should/could be skipped
-	//
-
-	serviceLabels := map[string]string{
-		common.AppSelector:   placement.ServiceName,
-		common.OwnerSelector: instance.Name,
-	}
-
-	// networks to attach to
-	for _, netAtt := range instance.Spec.NetworkAttachments {
-		_, err := nad.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
-		if err != nil {
-			if k8s_errors.IsNotFound(err) {
-				instance.Status.Conditions.Set(condition.FalseCondition(
-					condition.NetworkAttachmentsReadyCondition,
-					condition.RequestedReason,
-					condition.SeverityInfo,
-					condition.NetworkAttachmentsReadyWaitingMessage,
-					netAtt))
-				return ctrl.Result{RequeueAfter: time.Second * 10}, fmt.Errorf("network-attachment-definition %s not found", netAtt)
-			}
-			instance.Status.Conditions.Set(condition.FalseCondition(
-				condition.NetworkAttachmentsReadyCondition,
-				condition.ErrorReason,
-				condition.SeverityWarning,
-				condition.NetworkAttachmentsReadyErrorMessage,
-				err.Error()))
-			return ctrl.Result{}, err
-		}
-	}
-
-	serviceAnnotations, err := nad.CreateNetworksAnnotation(instance.Namespace, instance.Spec.NetworkAttachments)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed create network annotation from %s: %w",
-			instance.Spec.NetworkAttachments, err)
-	}
-
-	// Handle service init
-	ctrlResult, err = r.reconcileInit(ctx, instance, helper, serviceLabels, serviceAnnotations)
-	if err != nil {
-		return ctrlResult, err
-	} else if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
-	}
-
-	// Handle service update
-	ctrlResult, err = r.reconcileUpdate(ctx, instance, helper)
-	if err != nil {
-		return ctrlResult, err
-	} else if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
-	}
-
-	// Handle service upgrade
-	ctrlResult, err = r.reconcileUpgrade(ctx, instance, helper)
-	if err != nil {
-		return ctrlResult, err
-	} else if (ctrlResult != ctrl.Result{}) {
-		return ctrlResult, nil
-	}
-
-	//
-	// normal reconcile tasks
-	//
+	serviceLabels := getServiceLabels(instance)
 
 	// Define a new Deployment object
-	deplDef, err := placement.Deployment(ctx, helper, instance, inputHash, serviceLabels, serviceAnnotations)
+	deplDef, err := placement.Deployment(ctx, h, instance, inputHash, serviceLabels, serviceAnnotations)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.DeploymentReadyCondition,
@@ -873,14 +1101,14 @@ func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *
 			condition.SeverityWarning,
 			condition.DeploymentReadyErrorMessage,
 			err.Error()))
-		return ctrl.Result{}, err
 	}
+
 	depl := deployment.NewDeployment(
 		deplDef,
 		time.Duration(5)*time.Second,
 	)
 
-	ctrlResult, err = depl.CreateOrPatch(ctx, helper)
+	ctrlResult, err := depl.CreateOrPatch(ctx, h)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.DeploymentReadyCondition,
@@ -895,12 +1123,12 @@ func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *
 			condition.RequestedReason,
 			condition.SeverityInfo,
 			condition.DeploymentReadyRunningMessage))
-		return ctrlResult, nil
+		return ctrl.Result{}, nil
 	}
 	instance.Status.ReadyCount = depl.GetDeployment().Status.ReadyReplicas
 
 	// verify if network attachment matches expectations
-	networkReady, networkAttachmentStatus, err := nad.VerifyNetworkStatusFromAnnotation(ctx, helper, instance.Spec.NetworkAttachments, serviceLabels, instance.Status.ReadyCount)
+	networkReady, networkAttachmentStatus, err := nad.VerifyNetworkStatusFromAnnotation(ctx, h, instance.Spec.NetworkAttachments, serviceLabels, instance.Status.ReadyCount)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -920,9 +1148,19 @@ func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *
 		return ctrl.Result{}, err
 	}
 
-	if instance.Status.ReadyCount > 0 {
+	if instance.Status.ReadyCount > 0 || *instance.Spec.Replicas == 0 {
 		instance.Status.Conditions.MarkTrue(condition.DeploymentReadyCondition, condition.DeploymentReadyMessage)
+	} else {
+		Log.Info("Deployment is not ready")
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
+		// It is OK to return success as we are watching for StatefulSet changes
+		return ctrl.Result{}, nil
 	}
+
 	// create Deployment - end
 
 	Log.Info("Reconciled Service successfully")
@@ -930,17 +1168,17 @@ func (r *PlacementAPIReconciler) reconcileNormal(ctx context.Context, instance *
 }
 
 // generateServiceConfigMaps - create create configmaps which hold scripts and service configuration
-// TODO add DefaultConfigOverwrite
 func (r *PlacementAPIReconciler) generateServiceConfigMaps(
 	ctx context.Context,
 	h *helper.Helper,
 	instance *placementv1.PlacementAPI,
+	ospSecret corev1.Secret,
 	envVars *map[string]env.Setter,
 ) error {
 	//
-	// create Configmap/Secret required for placement input
-	// - %-scripts configmap holding scripts to e.g. bootstrap the service
-	// - %-config configmap holding minimal placement config required to get the service up, user can add additional files to be added to the service
+	// create Secret required for placement input
+	// - %-scripts secret holding scripts to e.g. bootstrap the service
+	// - %-config secret holding minimal placement config required to get the service up, user can add additional files to be added to the service
 	// - parameters which has passwords gets added from the ospSecret via the init container
 	//
 
@@ -949,7 +1187,6 @@ func (r *PlacementAPIReconciler) generateServiceConfigMaps(
 	// customData hold any customization for the service.
 	// custom.conf is going to /etc/<service>/<service>.conf.d
 	// all other files get placed into /etc/<service> to allow overwrite of e.g. policy.json
-	// TODO: make sure custom.conf can not be overwritten
 	customData := map[string]string{common.CustomServiceConfigFileName: instance.Spec.CustomServiceConfig}
 	for key, data := range instance.Spec.DefaultConfigOverwrite {
 		customData[key] = data
@@ -971,6 +1208,11 @@ func (r *PlacementAPIReconciler) generateServiceConfigMaps(
 		"ServiceUser":         instance.Spec.ServiceUser,
 		"KeystoneInternalURL": keystoneInternalURL,
 		"KeystonePublicURL":   keystonePublicURL,
+		"PlacementPassword":   string(ospSecret.Data[instance.Spec.PasswordSelectors.Service]),
+		"DBUser":              instance.Spec.DatabaseUser,
+		"DBPassword":          string(ospSecret.Data[instance.Spec.PasswordSelectors.Database]),
+		"DBAddress":           instance.Status.DatabaseHostname,
+		"DBName":              placement.DatabaseName,
 		"log_file":            "/var/log/placement/placement-api.log",
 	}
 
@@ -989,28 +1231,32 @@ func (r *PlacementAPIReconciler) generateServiceConfigMaps(
 	}
 	templateParameters["VHosts"] = httpdVhostConfig
 
+	extraTemplates := map[string]string{
+		"placement.conf": "placementapi/config/placement.conf",
+	}
+
 	cms := []util.Template{
 		// ScriptsConfigMap
 		{
-			Name:               fmt.Sprintf("%s-scripts", instance.Name),
-			Namespace:          instance.Namespace,
-			Type:               util.TemplateTypeScripts,
-			InstanceType:       instance.Kind,
-			AdditionalTemplate: map[string]string{"common.sh": "/common/common.sh"},
-			Labels:             cmLabels,
+			Name:         fmt.Sprintf("%s-scripts", instance.Name),
+			Namespace:    instance.Namespace,
+			Type:         util.TemplateTypeScripts,
+			InstanceType: instance.Kind,
+			Labels:       cmLabels,
 		},
 		// ConfigMap
 		{
-			Name:          fmt.Sprintf("%s-config-data", instance.Name),
-			Namespace:     instance.Namespace,
-			Type:          util.TemplateTypeConfig,
-			InstanceType:  instance.Kind,
-			CustomData:    customData,
-			ConfigOptions: templateParameters,
-			Labels:        cmLabels,
+			Name:               fmt.Sprintf("%s-config-data", instance.Name),
+			Namespace:          instance.Namespace,
+			Type:               util.TemplateTypeConfig,
+			InstanceType:       instance.Kind,
+			CustomData:         customData,
+			ConfigOptions:      templateParameters,
+			Labels:             cmLabels,
+			AdditionalTemplate: extraTemplates,
 		},
 	}
-	return configmap.EnsureConfigMaps(ctx, h, instance, cms, envVars)
+	return secret.EnsureSecrets(ctx, h, instance, cms, envVars)
 }
 
 // createHashOfInputHashes - creates a hash of hashes which gets added to the resources which requires a restart

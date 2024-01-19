@@ -22,10 +22,16 @@ limitations under the License.
 package v1beta1
 
 import (
+	"fmt"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
 // PlacementAPIDefaults -
@@ -75,25 +81,68 @@ func (spec *PlacementAPISpec) Default() {
 var _ webhook.Validator = &PlacementAPI{}
 
 // ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *PlacementAPI) ValidateCreate() error {
+func (r *PlacementAPI) ValidateCreate() (admission.Warnings, error) {
 	placementapilog.Info("validate create", "name", r.Name)
 
-	// TODO(user): fill in your validation logic upon object creation.
-	return nil
+	errors := r.Spec.ValidateCreate(field.NewPath("spec"))
+	if len(errors) != 0 {
+		placementapilog.Info("validation failed", "name", r.Name)
+		return nil, apierrors.NewInvalid(
+			schema.GroupKind{Group: "placement.openstack.org", Kind: "PlacementAPI"},
+			r.Name, errors)
+	}
+	return nil, nil
 }
 
 // ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *PlacementAPI) ValidateUpdate(old runtime.Object) error {
+func (r *PlacementAPI) ValidateUpdate(old runtime.Object) (admission.Warnings, error) {
 	placementapilog.Info("validate update", "name", r.Name)
+	oldPlacement, ok := old.(*PlacementAPI)
+	if !ok || oldPlacement == nil {
+		return nil, apierrors.NewInternalError(fmt.Errorf("unable to convert existing object"))
+	}
 
-	// TODO(user): fill in your validation logic upon object update.
-	return nil
+	errors := r.Spec.ValidateUpdate(oldPlacement.Spec, field.NewPath("spec"))
+	if len(errors) != 0 {
+		placementapilog.Info("validation failed", "name", r.Name)
+		return nil, apierrors.NewInvalid(
+			schema.GroupKind{Group: "placement.openstack.org", Kind: "PlacementAPI"},
+			r.Name, errors)
+	}
+	return nil, nil
 }
 
 // ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *PlacementAPI) ValidateDelete() error {
+func (r *PlacementAPI) ValidateDelete() (admission.Warnings, error) {
 	placementapilog.Info("validate delete", "name", r.Name)
 
 	// TODO(user): fill in your validation logic upon object deletion.
-	return nil
+	return nil, nil
+}
+
+func (r PlacementAPISpec) ValidateCreate(basePath *field.Path) field.ErrorList {
+	return r.ValidateDefaultConfigOverwrite(basePath)
+}
+
+func (r PlacementAPISpec) ValidateUpdate(old PlacementAPISpec, basePath *field.Path) field.ErrorList {
+	return r.ValidateDefaultConfigOverwrite(basePath)
+}
+
+func (r PlacementAPISpec) ValidateDefaultConfigOverwrite(
+	basePath *field.Path,
+) field.ErrorList {
+	var errors field.ErrorList
+	for requested := range r.DefaultConfigOverwrite {
+		if requested != "policy.yaml" {
+			errors = append(
+				errors,
+				field.Invalid(
+					basePath.Child("defaultConfigOverwrite"),
+					requested,
+					"Only the following keys are valid: policy.yaml",
+				),
+			)
+		}
+	}
+	return errors
 }

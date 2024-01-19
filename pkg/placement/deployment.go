@@ -56,36 +56,20 @@ func Deployment(
 		InitialDelaySeconds: 5,
 	}
 
-	args := []string{"-c"}
-	if instance.Spec.Debug.Service {
-		args = append(args, common.DebugCommand)
-		livenessProbe.Exec = &corev1.ExecAction{
-			Command: []string{
-				"/bin/true",
-			},
-		}
+	args := []string{"-c", KollaServiceCommand}
+	//
+	// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+	//
+	livenessProbe.HTTPGet = &corev1.HTTPGetAction{
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(PlacementPublicPort)},
+	}
+	readinessProbe.HTTPGet = &corev1.HTTPGetAction{
+		Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(PlacementPublicPort)},
+	}
 
-		readinessProbe.Exec = &corev1.ExecAction{
-			Command: []string{
-				"/bin/true",
-			},
-		}
-	} else {
-		args = append(args, KollaServiceCommand)
-		//
-		// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
-		//
-		livenessProbe.HTTPGet = &corev1.HTTPGetAction{
-			Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(PlacementPublicPort)},
-		}
-		readinessProbe.HTTPGet = &corev1.HTTPGetAction{
-			Port: intstr.IntOrString{Type: intstr.Int, IntVal: int32(PlacementPublicPort)},
-		}
-
-		if instance.Spec.TLS.API.Enabled(service.EndpointPublic) {
-			livenessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
-			readinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
-		}
+	if instance.Spec.TLS.API.Enabled(service.EndpointPublic) {
+		livenessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
+		readinessProbe.HTTPGet.Scheme = corev1.URISchemeHTTPS
 	}
 
 	envVars := map[string]env.Setter{}
@@ -123,7 +107,7 @@ func Deployment(
 
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ServiceName,
+			Name:      instance.Name,
 			Namespace: instance.Namespace,
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -141,7 +125,7 @@ func Deployment(
 					Volumes:            volumes,
 					Containers: []corev1.Container{
 						{
-							Name: ServiceName + "-log",
+							Name: instance.Name + "-log",
 							Command: []string{
 								"/usr/bin/dumb-init",
 							},
@@ -164,7 +148,7 @@ func Deployment(
 							LivenessProbe:  livenessProbe,
 						},
 						{
-							Name: ServiceName + "-api",
+							Name: instance.Name + "-api",
 							Command: []string{
 								"/bin/bash",
 							},
@@ -198,18 +182,6 @@ func Deployment(
 	if instance.Spec.NodeSelector != nil && len(instance.Spec.NodeSelector) > 0 {
 		deployment.Spec.Template.Spec.NodeSelector = instance.Spec.NodeSelector
 	}
-
-	initContainerDetails := APIDetails{
-		ContainerImage:       instance.Spec.ContainerImage,
-		DatabaseHost:         instance.Status.DatabaseHostname,
-		DatabaseUser:         instance.Spec.DatabaseUser,
-		DatabaseName:         DatabaseName,
-		OSPSecret:            instance.Spec.Secret,
-		DBPasswordSelector:   instance.Spec.PasswordSelectors.Database,
-		UserPasswordSelector: instance.Spec.PasswordSelectors.Service,
-		VolumeMounts:         getInitVolumeMounts(),
-	}
-	deployment.Spec.Template.Spec.InitContainers = initContainer(initContainerDetails)
 
 	return deployment, nil
 }

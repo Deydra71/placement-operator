@@ -18,7 +18,6 @@ package placement
 import (
 	placementv1 "github.com/openstack-k8s-operators/placement-operator/api/v1beta1"
 
-	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	env "github.com/openstack-k8s-operators/lib-common/modules/common/env"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -33,12 +32,7 @@ func DbSyncJob(
 	labels map[string]string,
 	annotations map[string]string,
 ) *batchv1.Job {
-	args := []string{"-c"}
-	if instance.Spec.Debug.DBSync {
-		args = append(args, common.DebugCommand)
-	} else {
-		args = append(args, KollaServiceCommand)
-	}
+	args := []string{"-c", KollaServiceCommand}
 
 	envVars := map[string]env.Setter{}
 	envVars["KOLLA_CONFIG_STRATEGY"] = env.SetValue("COPY_ALWAYS")
@@ -56,7 +50,7 @@ func DbSyncJob(
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      ServiceName + "-db-sync",
+			Name:      instance.Name + "-db-sync",
 			Namespace: instance.Namespace,
 			Labels:    labels,
 		},
@@ -70,7 +64,7 @@ func DbSyncJob(
 					ServiceAccountName: instance.RbacResourceName(),
 					Containers: []corev1.Container{
 						{
-							Name: ServiceName + "-db-sync",
+							Name: instance.Name + "-db-sync",
 							Command: []string{
 								"/bin/bash",
 							},
@@ -88,17 +82,6 @@ func DbSyncJob(
 			},
 		},
 	}
-
-	initContainerDetails := APIDetails{
-		ContainerImage:       instance.Spec.ContainerImage,
-		DatabaseHost:         instance.Status.DatabaseHostname,
-		DatabaseUser:         instance.Spec.DatabaseUser,
-		DatabaseName:         DatabaseName,
-		OSPSecret:            instance.Spec.Secret,
-		DBPasswordSelector:   instance.Spec.PasswordSelectors.Database,
-		UserPasswordSelector: instance.Spec.PasswordSelectors.Service,
-	}
-	job.Spec.Template.Spec.InitContainers = initContainer(initContainerDetails)
 
 	return job
 }

@@ -83,11 +83,6 @@ type PlacementAPISpec struct {
 	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
 
 	// +kubebuilder:validation:Optional
-	// Debug - enable debug for different deploy stages. If an init container is used, it runs and the
-	// actual action pod gets started with sleep infinity
-	Debug PlacementAPIDebug `json:"debug,omitempty"`
-
-	// +kubebuilder:validation:Optional
 	// +kubebuilder:default=false
 	// PreserveJobs - do not delete jobs after they finished e.g. to check logs
 	PreserveJobs bool `json:"preserveJobs"`
@@ -99,9 +94,7 @@ type PlacementAPISpec struct {
 	CustomServiceConfig string `json:"customServiceConfig"`
 
 	// +kubebuilder:validation:Optional
-	// ConfigOverwrite - interface to overwrite default config files like e.g. policy.json.
-	// But can also be used to add additional files. Those get added to the service config dir in /etc/<service> .
-	// TODO: -> implement
+	// DefaultConfigOverwrite - interface to overwrite default config files like policy.yaml.
 	DefaultConfigOverwrite map[string]string `json:"defaultConfigOverwrite,omitempty"`
 
 	// +kubebuilder:validation:Optional
@@ -141,18 +134,6 @@ type PasswordSelector struct {
 	// +kubebuilder:default="PlacementPassword"
 	// Service - Selector to get the service user password from the Secret
 	Service string `json:"service"`
-}
-
-// PlacementAPIDebug defines the observed state of PlacementAPIDebug
-type PlacementAPIDebug struct {
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:default=false
-	// DBSync enable debug
-	DBSync bool `json:"dbSync"`
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:default=false
-	// Service enable debug
-	Service bool `json:"service"`
 }
 
 // PlacementAPIStatus defines the observed state of PlacementAPI
@@ -227,4 +208,9 @@ func SetupDefaults() {
 	}
 
 	SetupPlacementAPIDefaults(placementDefaults)
+}
+
+// GetSecret returns the value of the Nova.Spec.Secret
+func (instance PlacementAPI) GetSecret() string {
+	return instance.Spec.Secret
 }
